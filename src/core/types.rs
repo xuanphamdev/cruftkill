@@ -12,20 +12,15 @@ use std::time::SystemTime;
 /// Mirrors npkill's `SortBy = 'path' | 'size' | 'age'`. Comparators in
 /// [`crate::core::sort`] (Phase 06) preserve npkill's null-aware,
 /// path-tiebreaking semantics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SortBy {
     /// Lexicographic path ascending.
     Path,
     /// On-disk size descending; tiebreak by path ascending.
+    #[default]
     Size,
     /// Last-modified ascending (older first); nulls last; tiebreak by path.
     Age,
-}
-
-impl Default for SortBy {
-    fn default() -> Self {
-        Self::Size
-    }
 }
 
 /// Risk classification for a found folder.

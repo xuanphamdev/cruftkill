@@ -88,7 +88,11 @@ async fn three_files_three_levels_sums_them_all() {
     write_file(&root.join("b/c/c.bin"), &[0u8; 100]);
 
     let total = size::get_folder_size(root).await.unwrap();
-    // 3 files (each rounds up to >= 1 block) + 2 subdir overheads (b/, b/c/)
-    // = at least 3*512 + 2*4096 = 9728 bytes. Use a loose lower bound.
-    assert!(total >= 3 * 512 + 2 * 4096, "expected >=9728, got {total}");
+    // Lower bound that holds on both platforms:
+    //   - Unix: blocks*512 ≥ 1 disk block per file (512) + 4096 per subdir
+    //          → 3*512 + 2*4096 = 9728
+    //   - Windows: metadata.len() = 100 bytes per file + 4096 per subdir
+    //          → 3*100 + 2*4096 = 8492
+    // We use the Windows-floor so both pass; Unix produces a larger number.
+    assert!(total >= 3 * 100 + 2 * 4096, "expected >= 8492 bytes (3 files + 2 dirs), got {total}");
 }
