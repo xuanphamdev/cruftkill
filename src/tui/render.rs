@@ -128,7 +128,7 @@ fn draw_table(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 
 fn draw_status(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let hint = match state.mode {
-        Mode::Browse => "↑↓/jk navigate · d/Enter delete · s size · n name · m last-used · q quit",
+        Mode::Browse => "↑↓ navigate · d delete · s/n/m sort · r rescan · q quit",
         Mode::Confirm(_) => "y delete · n / Esc cancel",
     };
     let mut spans = vec![Span::styled(hint, Style::default().fg(Color::DarkGray))];

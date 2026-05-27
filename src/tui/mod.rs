@@ -69,14 +69,16 @@ impl Drop for TerminalGuard {
 pub async fn run(args: CliArgs) -> anyhow::Result<()> {
     let root = args.root_path()?;
     let targets = args.resolved_targets();
-    let opts = ScanOptions {
-        targets: targets.clone(),
-        exclude: args.exclude.clone(),
-        sort_by: Some(args.sort.into()),
-        perform_risk_analysis: !args.no_risk,
-    };
     let sort: SortBy = args.sort.into();
     let dry_run = args.dry_run;
+
+    // ScanOptions are rebuilt for every (re-)scan via `make_opts`.
+    let make_opts = || ScanOptions {
+        targets: targets.clone(),
+        exclude: args.exclude.clone(),
+        sort_by: Some(sort),
+        perform_risk_analysis: !args.no_risk,
+    };
 
     // Default direction comes from `SortDirection::default()` = Desc, which
     // happens to match the user's expectation for the default Size sort.
@@ -85,7 +87,7 @@ pub async fn run(args: CliArgs) -> anyhow::Result<()> {
     let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).ok();
     let home_path = home.as_deref().map(std::path::PathBuf::from);
 
-    let mut handle = scanner::start_scan(root.clone(), opts);
+    let mut handle = scanner::start_scan(root.clone(), make_opts());
 
     let mut term = TerminalGuard::enter().context("failed to enter TUI mode")?;
     let mut events = EventStream::new();
@@ -136,6 +138,15 @@ pub async fn run(args: CliArgs) -> anyhow::Result<()> {
                                 let res = delete::delete(&path, &scan_root, &targets, dry_run).await;
                                 let _ = tx.send((index, res.success, res.error)).await;
                             });
+                        }
+                        Effect::Rescan => {
+                            // Cancel current scan; the channel will drain to None on the
+                            // next iteration. Reset per-scan caches.
+                            handle.cancel.cancel();
+                            size_requested.clear();
+                            // Spawn a fresh scanner. AppState was already cleared by the
+                            // reducer (`clear_for_rescan`).
+                            handle = scanner::start_scan(root.clone(), make_opts());
                         }
                         Effect::None => {}
                     }
@@ -206,6 +217,7 @@ fn map_key(k: KeyEvent, mode: &Mode) -> Action {
         KeyCode::Char('s') | KeyCode::Char('S') => Action::ToggleSortBySize,
         KeyCode::Char('n') | KeyCode::Char('N') => Action::ToggleSortByName,
         KeyCode::Char('m') | KeyCode::Char('M') => Action::ToggleSortByLastUsed,
+        KeyCode::Char('r') | KeyCode::Char('R') | KeyCode::F(5) => Action::Rescan,
         _ => Action::Noop,
     }
 }
@@ -238,6 +250,14 @@ mod tests {
         assert_eq!(map_key(key(KeyCode::Char('s')), &m), Action::ToggleSortBySize);
         assert_eq!(map_key(key(KeyCode::Char('n')), &m), Action::ToggleSortByName);
         assert_eq!(map_key(key(KeyCode::Char('m')), &m), Action::ToggleSortByLastUsed);
+    }
+
+    #[test]
+    fn browse_mode_rescan_keys() {
+        let m = Mode::Browse;
+        assert_eq!(map_key(key(KeyCode::Char('r')), &m), Action::Rescan);
+        assert_eq!(map_key(key(KeyCode::Char('R')), &m), Action::Rescan);
+        assert_eq!(map_key(key(KeyCode::F(5)), &m), Action::Rescan);
     }
 
     #[test]

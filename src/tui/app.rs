@@ -39,6 +39,12 @@ pub struct AppState {
     /// Set true when the scanner channel closes — used in the status bar.
     pub scan_finished: bool,
 
+    /// `true` once the user has pressed ↑/↓ at least once. Until then we
+    /// keep the cursor pinned to row 0 across re-sorts so the "top hit"
+    /// stays visible while results stream in. After the user moves the
+    /// cursor we switch to "preserve by path" behaviour.
+    pub user_navigated: bool,
+
     /// Last status / error message shown to the user. Cleared on next action.
     pub last_message: Option<String>,
 }
@@ -66,6 +72,7 @@ impl AppState {
             sort,
             sort_direction,
             scan_finished: false,
+            user_navigated: false,
             last_message: None,
         }
     }
@@ -96,6 +103,10 @@ pub enum Action {
     ToggleSortBySize,
     ToggleSortByName,
     ToggleSortByLastUsed,
+    /// Cancel the current scan, clear results, and start a fresh scan with
+    /// the same options. Useful after the user has just deleted folders and
+    /// wants a clean state.
+    Rescan,
     Quit,
     Noop,
 }
@@ -111,6 +122,9 @@ pub enum Effect {
     },
     /// Tear down the TUI and exit.
     Quit,
+    /// Cancel the current scan and start a new one with the same options.
+    /// Main loop is responsible for the actual scanner lifecycle.
+    Rescan,
     None,
 }
 
@@ -120,12 +134,14 @@ impl AppState {
         self.last_message = None;
         match action {
             Action::Up => {
+                self.user_navigated = true;
                 if self.cursor > 0 {
                     self.cursor -= 1;
                 }
                 Effect::None
             }
             Action::Down => {
+                self.user_navigated = true;
                 if !self.results.is_empty() && self.cursor + 1 < self.results.len() {
                     self.cursor += 1;
                 }
@@ -169,9 +185,27 @@ impl AppState {
                 self.toggle_or_switch_sort(SortBy::Age, SortDirection::Desc);
                 Effect::None
             }
+            Action::Rescan => {
+                if matches!(self.mode, Mode::Browse) {
+                    self.clear_for_rescan();
+                    Effect::Rescan
+                } else {
+                    Effect::None
+                }
+            }
             Action::Quit => Effect::Quit,
             Action::Noop => Effect::None,
         }
+    }
+
+    /// Reset everything that depends on a specific scan run. Keeps the
+    /// user's chosen sort + direction + targets + root + dry_run flag.
+    pub fn clear_for_rescan(&mut self) {
+        self.results.clear();
+        self.cursor = 0;
+        self.user_navigated = false;
+        self.scan_finished = false;
+        self.last_message = Some("rescanning…".into());
     }
 
     fn toggle_or_switch_sort(&mut self, by: SortBy, default_direction: SortDirection) {
@@ -184,15 +218,24 @@ impl AppState {
         self.resort();
     }
 
-    /// Sort `results` by the current `sort` + `sort_direction`, preserving
-    /// the cursor on whichever row was selected.
+    /// Sort `results` by the current `sort` + `sort_direction`.
+    ///
+    /// Cursor policy:
+    /// - If the user has not navigated yet (`!user_navigated`), pin to row 0
+    ///   so the top hit stays visible while results stream in or get re-sorted.
+    /// - Otherwise, preserve the cursor on whichever row was selected
+    ///   (by path), so a sort-toggle keeps your item in view.
+    /// - Final clamp to keep the cursor in range.
     pub fn resort(&mut self) {
-        let selected_path = self.selected().map(|r| r.path.clone());
+        let selected_path =
+            if self.user_navigated { self.selected().map(|r| r.path.clone()) } else { None };
         sort_results(&mut self.results, self.sort, self.sort_direction);
         if let Some(p) = selected_path
             && let Some(idx) = self.results.iter().position(|r| r.path == p)
         {
             self.cursor = idx;
+        } else if !self.user_navigated {
+            self.cursor = 0;
         } else if self.cursor >= self.results.len() && !self.results.is_empty() {
             self.cursor = self.results.len() - 1;
         }
@@ -246,8 +289,17 @@ impl AppState {
         }
     }
 
+    /// Called when the scanner channel closes. Per user request: always
+    /// snap the cursor to the first row when the scan completes — even if
+    /// the user has been navigating — so the "top hit" is immediately
+    /// visible. The user can still scroll afterwards.
     pub fn mark_scan_finished(&mut self) {
+        let was_already_finished = self.scan_finished;
         self.scan_finished = true;
+        if !was_already_finished && !self.results.is_empty() {
+            self.cursor = 0;
+            self.user_navigated = false;
+        }
     }
 }
 
@@ -402,7 +454,7 @@ mod tests {
     }
 
     #[test]
-    fn resort_keeps_cursor_on_same_row() {
+    fn resort_keeps_cursor_on_same_row_after_user_navigates() {
         let mut s = fresh_state(); // sort=Size desc
         push(&mut s, "/aaa");
         push(&mut s, "/bbb");
@@ -411,14 +463,114 @@ mod tests {
         s.record_size(Path::new("/bbb"), 999);
         s.record_size(Path::new("/ccc"), 500);
         // Order under Size+Desc: bbb(999), ccc(500), aaa(100).
-        // Put cursor on the middle row (ccc).
+        // Move cursor down to the middle (ccc) — this also flips user_navigated.
+        s.apply(Action::Down);
+        assert!(s.user_navigated);
         let ccc_idx = s.results.iter().position(|r| r.path == Path::new("/ccc")).unwrap();
-        s.cursor = ccc_idx;
+        assert_eq!(s.cursor, ccc_idx);
         // Flip to Asc.
         s.apply(Action::ToggleSortBySize);
         // New order: aaa(100), ccc(500), bbb(999). Cursor should still point to ccc.
         let new_idx = s.results.iter().position(|r| r.path == Path::new("/ccc")).unwrap();
         assert_eq!(s.cursor, new_idx);
+    }
+
+    // ─── Auto-top + rescan behaviour ────────────────────────────────────────
+
+    #[test]
+    fn cursor_pinned_at_top_during_streaming_until_user_navigates() {
+        // Simulate live streaming: rows arrive one-by-one with sizes filling in.
+        let mut s = fresh_state();
+        let scan = |p: &str| ScanFoundFolder::new(PathBuf::from(p), None);
+        s.push_result(scan("/small"));
+        s.record_size(Path::new("/small"), 100);
+        // Now a bigger row arrives — it should sort to the top under Size+Desc,
+        // and because user hasn't navigated, the cursor must move to the new top row.
+        s.push_result(scan("/big"));
+        s.record_size(Path::new("/big"), 10_000);
+        assert_eq!(s.cursor, 0);
+        assert_eq!(s.selected().unwrap().path, PathBuf::from("/big"));
+
+        // User presses Down → user_navigated flips → cursor follows the row.
+        s.apply(Action::Down);
+        assert!(s.user_navigated);
+        let small_idx = s.results.iter().position(|r| r.path == Path::new("/small")).unwrap();
+        assert_eq!(s.cursor, small_idx);
+
+        // Another row arrives mid-stream; cursor should STAY on /small now.
+        s.push_result(scan("/medium"));
+        s.record_size(Path::new("/medium"), 1_000);
+        assert_eq!(s.selected().unwrap().path, PathBuf::from("/small"));
+    }
+
+    #[test]
+    fn scan_finished_snaps_cursor_to_top_even_if_user_navigated() {
+        let mut s = fresh_state();
+        push(&mut s, "/a");
+        push(&mut s, "/b");
+        push(&mut s, "/c");
+        // User moved around mid-scan.
+        s.apply(Action::Down);
+        s.apply(Action::Down);
+        assert!(s.cursor > 0);
+        // Scan completes.
+        s.mark_scan_finished();
+        assert_eq!(s.cursor, 0, "post-scan cursor must snap to top");
+        assert!(s.scan_finished);
+        // user_navigated also resets so further streaming-style pushes pin to top
+        // (in case the user later rescans).
+        assert!(!s.user_navigated);
+    }
+
+    #[test]
+    fn scan_finished_is_idempotent_does_not_reset_cursor_on_redundant_calls() {
+        let mut s = fresh_state();
+        push(&mut s, "/a");
+        push(&mut s, "/b");
+        push(&mut s, "/c");
+        s.mark_scan_finished();
+        assert_eq!(s.cursor, 0);
+        // Now user navigates AFTER scan finished.
+        s.apply(Action::Down);
+        assert_eq!(s.cursor, 1);
+        // A second mark_scan_finished call (e.g., main loop double-checks) must
+        // NOT yank the cursor back to 0 again.
+        s.mark_scan_finished();
+        assert_eq!(s.cursor, 1, "redundant mark_scan_finished should be a no-op");
+    }
+
+    #[test]
+    fn rescan_clears_results_and_emits_effect() {
+        let mut s = fresh_state();
+        push(&mut s, "/a");
+        push(&mut s, "/b");
+        s.apply(Action::Down);
+        s.mark_scan_finished();
+        // Sanity.
+        assert_eq!(s.results.len(), 2);
+        assert!(s.scan_finished);
+
+        let eff = s.apply(Action::Rescan);
+        assert_eq!(eff, Effect::Rescan);
+        assert!(s.results.is_empty());
+        assert_eq!(s.cursor, 0);
+        assert!(!s.scan_finished);
+        assert!(!s.user_navigated);
+        // status message acknowledges the action
+        assert!(s.last_message.as_deref().unwrap_or("").contains("rescan"));
+    }
+
+    #[test]
+    fn rescan_ignored_in_confirm_mode() {
+        let mut s = fresh_state();
+        push(&mut s, "/a/node_modules");
+        s.apply(Action::RequestDelete);
+        assert!(matches!(s.mode, Mode::Confirm(_)));
+        let eff = s.apply(Action::Rescan);
+        assert_eq!(eff, Effect::None);
+        // Modal is still active and results unchanged.
+        assert!(matches!(s.mode, Mode::Confirm(_)));
+        assert_eq!(s.results.len(), 1);
     }
 
     #[test]
