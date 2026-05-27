@@ -21,6 +21,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState};
 
+use crate::core::types::SortBy;
 use crate::tui::app::{AppState, Mode};
 
 pub fn draw(frame: &mut Frame<'_>, state: &AppState) {
@@ -52,12 +53,23 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         Span::raw("  "),
         Span::raw(state.root.display().to_string()),
     ]);
+    let sort_label = match state.sort {
+        SortBy::Path => "name",
+        SortBy::Size => "size",
+        SortBy::Age => "last-used",
+    };
     let stats = Line::from(vec![
         Span::raw(format!("{} found", state.results.len())),
         Span::raw(" · "),
         Span::raw(human_bytes(state.total_size())),
         Span::raw(" total · "),
         Span::styled(scan_state, Style::default().fg(Color::Yellow)),
+        Span::raw(" · "),
+        Span::styled("sort: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("{sort_label} {}", state.sort_direction.indicator()),
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ),
         Span::styled(dry_badge, Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
     ]);
 
@@ -116,7 +128,7 @@ fn draw_table(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 
 fn draw_status(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let hint = match state.mode {
-        Mode::Browse => "↑↓/jk navigate · d/Enter delete · q quit",
+        Mode::Browse => "↑↓/jk navigate · d/Enter delete · s size · n name · m last-used · q quit",
         Mode::Confirm(_) => "y delete · n / Esc cancel",
     };
     let mut spans = vec![Span::styled(hint, Style::default().fg(Color::DarkGray))];

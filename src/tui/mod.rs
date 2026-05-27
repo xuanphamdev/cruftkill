@@ -1,8 +1,7 @@
 //! Interactive ratatui-based UI for the `nmk` binary.
 //!
-//! v0.1 deliberately ships a minimal feel: header, results table, status hint,
-//! delete-with-confirm modal. Filter, help overlay, sort cycle, and live
-//! progress bars are deferred.
+//! v0.1 ships a minimal feel: header, results table, status hint, delete
+//! confirm modal, and **interactive sort** via `s` / `n` / `m` keys.
 //!
 //! The main loop drives three event sources at the same time:
 //! 1. periodic tick (so the scan-status spinner and pending sizes refresh),
@@ -35,7 +34,7 @@ use crate::cli::CliArgs;
 use crate::core::types::{ScanOptions, SortBy};
 use crate::core::{delete, risk, scanner, size};
 
-use self::app::{Action, AppState, Effect};
+use self::app::{Action, AppState, Effect, Mode};
 
 /// RAII terminal-mode guard: restores the terminal on drop, even during panic.
 struct TerminalGuard {
@@ -79,14 +78,13 @@ pub async fn run(args: CliArgs) -> anyhow::Result<()> {
     let sort: SortBy = args.sort.into();
     let dry_run = args.dry_run;
 
+    // Default direction comes from `SortDirection::default()` = Desc, which
+    // happens to match the user's expectation for the default Size sort.
     let mut state = AppState::new(root.clone(), targets.clone(), dry_run, sort);
 
     let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).ok();
     let home_path = home.as_deref().map(std::path::PathBuf::from);
 
-    // Re-wrap scanner result risk to use the centralised home (instead of
-    // re-reading env per result). The scanner already computed a placeholder
-    // via Phase 02; we recompute here so reasons are accurate.
     let mut handle = scanner::start_scan(root.clone(), opts);
 
     let mut term = TerminalGuard::enter().context("failed to enter TUI mode")?;
@@ -123,8 +121,7 @@ pub async fn run(args: CliArgs) -> anyhow::Result<()> {
             Some(ev) = events.next() => {
                 let Ok(ev) = ev else { continue };
                 if let Event::Key(k) = ev {
-                    let action = map_key(k);
-                    // Recompute risk for the latest results before quitting / etc.
+                    let action = map_key(k, &state.mode);
                     let effect = state.apply(action);
                     match effect {
                         Effect::Quit => {
@@ -152,7 +149,10 @@ pub async fn run(args: CliArgs) -> anyhow::Result<()> {
                 if !args.no_risk {
                     found.risk_analysis = Some(risk::analyze_with_home(&found.path, home_path.as_deref()));
                 }
-                state.push_result(found);
+                // Synchronously stat the folder so the Age sort works as soon
+                // as the row appears. Single syscall — cheap.
+                let mtime = std::fs::metadata(&found.path).and_then(|m| m.modified()).ok();
+                state.push_result_with_mtime(found, mtime);
             }
 
             Some((path, sz)) = size_rx.recv() => {
@@ -164,8 +164,6 @@ pub async fn run(args: CliArgs) -> anyhow::Result<()> {
             }
 
             else => {
-                // All channels closed and no events — mark scan done. The user
-                // can still navigate / delete already-discovered rows.
                 if !state.scan_finished {
                     state.mark_scan_finished();
                 }
@@ -173,8 +171,6 @@ pub async fn run(args: CliArgs) -> anyhow::Result<()> {
             }
         }
 
-        // After each event, detect "scanner done" so the header can show it.
-        // The receiver returns None only after all senders drop.
         if !state.scan_finished && handle.results.is_closed() {
             state.mark_scan_finished();
         }
@@ -183,21 +179,33 @@ pub async fn run(args: CliArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn map_key(k: KeyEvent) -> Action {
+/// Translate a key press into an [`Action`]. Mode-aware: in `Confirm`, only
+/// y/n/Esc/Ctrl-C are meaningful so the same physical keys can serve other
+/// purposes in `Browse` (e.g. `n` toggles sort-by-name).
+fn map_key(k: KeyEvent, mode: &Mode) -> Action {
     if k.kind == KeyEventKind::Release {
         return Action::Noop;
     }
-    // Ctrl-C always quits, regardless of modal state.
+    // Ctrl-C always quits, regardless of mode.
     if k.modifiers.contains(KeyModifiers::CONTROL) && matches!(k.code, KeyCode::Char('c')) {
         return Action::Quit;
     }
+    if matches!(mode, Mode::Confirm(_)) {
+        return match k.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => Action::ConfirmYes,
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Action::ConfirmNo,
+            _ => Action::Noop,
+        };
+    }
+    // Browse mode.
     match k.code {
         KeyCode::Up | KeyCode::Char('k') => Action::Up,
         KeyCode::Down | KeyCode::Char('j') => Action::Down,
         KeyCode::Char('q') => Action::Quit,
         KeyCode::Char('d') | KeyCode::Char(' ') | KeyCode::Enter => Action::RequestDelete,
-        KeyCode::Char('y') | KeyCode::Char('Y') => Action::ConfirmYes,
-        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Action::ConfirmNo,
+        KeyCode::Char('s') | KeyCode::Char('S') => Action::ToggleSortBySize,
+        KeyCode::Char('n') | KeyCode::Char('N') => Action::ToggleSortByName,
+        KeyCode::Char('m') | KeyCode::Char('M') => Action::ToggleSortByLastUsed,
         _ => Action::Noop,
     }
 }
@@ -212,37 +220,57 @@ mod tests {
     }
 
     #[test]
-    fn arrows_and_letters_map_correctly() {
-        assert_eq!(map_key(key(KeyCode::Up)), Action::Up);
-        assert_eq!(map_key(key(KeyCode::Char('k'))), Action::Up);
-        assert_eq!(map_key(key(KeyCode::Down)), Action::Down);
-        assert_eq!(map_key(key(KeyCode::Char('j'))), Action::Down);
-        assert_eq!(map_key(key(KeyCode::Char('q'))), Action::Quit);
-        assert_eq!(map_key(key(KeyCode::Char('d'))), Action::RequestDelete);
-        assert_eq!(map_key(key(KeyCode::Enter)), Action::RequestDelete);
-        assert_eq!(map_key(key(KeyCode::Char(' '))), Action::RequestDelete);
-        assert_eq!(map_key(key(KeyCode::Char('y'))), Action::ConfirmYes);
-        assert_eq!(map_key(key(KeyCode::Char('Y'))), Action::ConfirmYes);
-        assert_eq!(map_key(key(KeyCode::Char('n'))), Action::ConfirmNo);
-        assert_eq!(map_key(key(KeyCode::Esc)), Action::ConfirmNo);
+    fn browse_mode_navigation_and_delete() {
+        let m = Mode::Browse;
+        assert_eq!(map_key(key(KeyCode::Up), &m), Action::Up);
+        assert_eq!(map_key(key(KeyCode::Char('k')), &m), Action::Up);
+        assert_eq!(map_key(key(KeyCode::Down), &m), Action::Down);
+        assert_eq!(map_key(key(KeyCode::Char('j')), &m), Action::Down);
+        assert_eq!(map_key(key(KeyCode::Char('q')), &m), Action::Quit);
+        assert_eq!(map_key(key(KeyCode::Char('d')), &m), Action::RequestDelete);
+        assert_eq!(map_key(key(KeyCode::Enter), &m), Action::RequestDelete);
+        assert_eq!(map_key(key(KeyCode::Char(' ')), &m), Action::RequestDelete);
     }
 
     #[test]
-    fn ctrl_c_quits() {
+    fn browse_mode_sort_keys() {
+        let m = Mode::Browse;
+        assert_eq!(map_key(key(KeyCode::Char('s')), &m), Action::ToggleSortBySize);
+        assert_eq!(map_key(key(KeyCode::Char('n')), &m), Action::ToggleSortByName);
+        assert_eq!(map_key(key(KeyCode::Char('m')), &m), Action::ToggleSortByLastUsed);
+    }
+
+    #[test]
+    fn confirm_mode_only_yes_no_esc() {
+        let m = Mode::Confirm(0);
+        assert_eq!(map_key(key(KeyCode::Char('y')), &m), Action::ConfirmYes);
+        assert_eq!(map_key(key(KeyCode::Char('Y')), &m), Action::ConfirmYes);
+        assert_eq!(map_key(key(KeyCode::Char('n')), &m), Action::ConfirmNo);
+        assert_eq!(map_key(key(KeyCode::Char('N')), &m), Action::ConfirmNo);
+        assert_eq!(map_key(key(KeyCode::Esc), &m), Action::ConfirmNo);
+        // Sort keys are NOT sort actions in Confirm — they're noops.
+        assert_eq!(map_key(key(KeyCode::Char('s')), &m), Action::Noop);
+        assert_eq!(map_key(key(KeyCode::Char('d')), &m), Action::Noop);
+    }
+
+    #[test]
+    fn ctrl_c_quits_in_any_mode() {
         let k = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        assert_eq!(map_key(k), Action::Quit);
+        assert_eq!(map_key(k, &Mode::Browse), Action::Quit);
+        assert_eq!(map_key(k, &Mode::Confirm(0)), Action::Quit);
     }
 
     #[test]
     fn unknown_keys_are_noop() {
-        assert_eq!(map_key(key(KeyCode::F(1))), Action::Noop);
-        assert_eq!(map_key(key(KeyCode::Char('x'))), Action::Noop);
+        let m = Mode::Browse;
+        assert_eq!(map_key(key(KeyCode::F(1)), &m), Action::Noop);
+        assert_eq!(map_key(key(KeyCode::Char('x')), &m), Action::Noop);
     }
 
     #[test]
     fn key_release_is_noop() {
         let mut k = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
         k.kind = KeyEventKind::Release;
-        assert_eq!(map_key(k), Action::Noop);
+        assert_eq!(map_key(k, &Mode::Browse), Action::Noop);
     }
 }

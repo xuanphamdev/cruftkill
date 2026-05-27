@@ -14,13 +14,43 @@ use std::time::SystemTime;
 /// path-tiebreaking semantics.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SortBy {
-    /// Lexicographic path ascending.
+    /// By path (basename + full path lexicographic).
     Path,
-    /// On-disk size descending; tiebreak by path ascending.
+    /// By on-disk size.
     #[default]
     Size,
-    /// Last-modified ascending (older first); nulls last; tiebreak by path.
+    /// By last-modified timestamp.
     Age,
+}
+
+/// Sort direction. Default is `Desc` because the most common case is
+/// "biggest folders first".
+///
+/// Missing values (`size_bytes == None`, `last_modified == None`) are
+/// ALWAYS placed last regardless of direction. Tiebreak is path-ascending
+/// regardless of direction. Only the *primary* key is reversed.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SortDirection {
+    Asc,
+    #[default]
+    Desc,
+}
+
+impl SortDirection {
+    pub fn toggle(self) -> Self {
+        match self {
+            Self::Asc => Self::Desc,
+            Self::Desc => Self::Asc,
+        }
+    }
+
+    /// Unicode arrow for display in the header (`↑` asc, `↓` desc).
+    pub fn indicator(self) -> &'static str {
+        match self {
+            Self::Asc => "↑",
+            Self::Desc => "↓",
+        }
+    }
 }
 
 /// Risk classification for a found folder.

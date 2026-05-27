@@ -1,7 +1,7 @@
 //! TUI application state and pure-function reducer.
 //!
 //! Keeps render code and event handling decoupled: the main loop
-//! ([`super::mod::run`]) translates `KeyEvent` / scan-result / size-result
+//! ([`super::run`]) translates `KeyEvent` / scan-result / size-result
 //! signals into [`Action`]s; this module applies them to [`AppState`] and
 //! returns a small set of side effects that the loop performs (e.g. "delete
 //! folder at index N").
@@ -10,8 +10,10 @@
 //! real terminal — see the `tests` module below.
 
 use std::path::PathBuf;
+use std::time::SystemTime;
 
-use crate::core::types::{FolderResult, ScanFoundFolder, SortBy};
+use crate::core::sort::sort_results;
+use crate::core::types::{FolderResult, ScanFoundFolder, SortBy, SortDirection};
 
 /// What the TUI is currently doing. Most of the time it's `Browse`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +34,7 @@ pub struct AppState {
     pub cursor: usize,
     pub mode: Mode,
     pub sort: SortBy,
+    pub sort_direction: SortDirection,
 
     /// Set true when the scanner channel closes — used in the status bar.
     pub scan_finished: bool,
@@ -41,7 +44,18 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Create a new state with the default sort (`Size` desc).
     pub fn new(root: PathBuf, targets: Vec<String>, dry_run: bool, sort: SortBy) -> Self {
+        Self::with_sort(root, targets, dry_run, sort, SortDirection::default())
+    }
+
+    pub fn with_sort(
+        root: PathBuf,
+        targets: Vec<String>,
+        dry_run: bool,
+        sort: SortBy,
+        sort_direction: SortDirection,
+    ) -> Self {
         Self {
             root,
             targets,
@@ -50,6 +64,7 @@ impl AppState {
             cursor: 0,
             mode: Mode::Browse,
             sort,
+            sort_direction,
             scan_finished: false,
             last_message: None,
         }
@@ -75,6 +90,12 @@ pub enum Action {
     RequestDelete,
     ConfirmYes,
     ConfirmNo,
+    /// Toggle sort by size. Pressing again flips direction. When switching
+    /// FROM another sort, the direction resets to the default for that key
+    /// (Size→Desc, Name→Asc, LastUsed→Desc).
+    ToggleSortBySize,
+    ToggleSortByName,
+    ToggleSortByLastUsed,
     Quit,
     Noop,
 }
@@ -136,20 +157,78 @@ impl AppState {
                 }
                 Effect::None
             }
+            Action::ToggleSortBySize => {
+                self.toggle_or_switch_sort(SortBy::Size, SortDirection::Desc);
+                Effect::None
+            }
+            Action::ToggleSortByName => {
+                self.toggle_or_switch_sort(SortBy::Path, SortDirection::Asc);
+                Effect::None
+            }
+            Action::ToggleSortByLastUsed => {
+                self.toggle_or_switch_sort(SortBy::Age, SortDirection::Desc);
+                Effect::None
+            }
             Action::Quit => Effect::Quit,
             Action::Noop => Effect::None,
         }
     }
 
-    /// Push a result coming off the scanner channel.
+    fn toggle_or_switch_sort(&mut self, by: SortBy, default_direction: SortDirection) {
+        if self.sort == by {
+            self.sort_direction = self.sort_direction.toggle();
+        } else {
+            self.sort = by;
+            self.sort_direction = default_direction;
+        }
+        self.resort();
+    }
+
+    /// Sort `results` by the current `sort` + `sort_direction`, preserving
+    /// the cursor on whichever row was selected.
+    pub fn resort(&mut self) {
+        let selected_path = self.selected().map(|r| r.path.clone());
+        sort_results(&mut self.results, self.sort, self.sort_direction);
+        if let Some(p) = selected_path
+            && let Some(idx) = self.results.iter().position(|r| r.path == p)
+        {
+            self.cursor = idx;
+        } else if self.cursor >= self.results.len() && !self.results.is_empty() {
+            self.cursor = self.results.len() - 1;
+        }
+    }
+
+    /// Push a result coming off the scanner channel. Caller can preset
+    /// `last_modified` if they have it (the TUI does this synchronously
+    /// from `fs::metadata` so the `Age` sort is meaningful immediately).
     pub fn push_result(&mut self, found: ScanFoundFolder) {
         self.results.push(FolderResult::from_scan(found));
+        self.resort();
+    }
+
+    /// Push a result and seed its `last_modified` in one call.
+    pub fn push_result_with_mtime(
+        &mut self,
+        found: ScanFoundFolder,
+        last_modified: Option<SystemTime>,
+    ) {
+        let mut row = FolderResult::from_scan(found);
+        row.last_modified = last_modified;
+        self.results.push(row);
+        self.resort();
     }
 
     /// Update a row's size after the size-calc task completes.
     pub fn record_size(&mut self, path: &std::path::Path, size: u64) {
-        if let Some(row) = self.results.iter_mut().find(|r| r.path == path) {
+        let changed = if let Some(row) = self.results.iter_mut().find(|r| r.path == path) {
             row.size_bytes = Some(size);
+            true
+        } else {
+            false
+        };
+        // Only re-sort if the change can affect ordering.
+        if changed && self.sort == SortBy::Size {
+            self.resort();
         }
     }
 
@@ -176,6 +255,7 @@ impl AppState {
 mod tests {
     use super::*;
     use std::path::Path;
+    use std::time::Duration;
 
     fn fresh_state() -> AppState {
         AppState::new(PathBuf::from("/root"), vec!["node_modules".into()], false, SortBy::Size)
@@ -183,6 +263,13 @@ mod tests {
 
     fn push(state: &mut AppState, p: &str) {
         state.push_result(ScanFoundFolder::new(PathBuf::from(p), None));
+    }
+
+    #[test]
+    fn default_sort_is_size_desc() {
+        let s = fresh_state();
+        assert_eq!(s.sort, SortBy::Size);
+        assert_eq!(s.sort_direction, SortDirection::Desc);
     }
 
     #[test]
@@ -250,8 +337,10 @@ mod tests {
         push(&mut s, "/a/node_modules");
         push(&mut s, "/b/node_modules");
         s.record_size(Path::new("/a/node_modules"), 42_000);
-        assert_eq!(s.results[0].size_bytes, Some(42_000));
-        assert_eq!(s.results[1].size_bytes, None);
+        let row_a = s.results.iter().find(|r| r.path == Path::new("/a/node_modules")).unwrap();
+        let row_b = s.results.iter().find(|r| r.path == Path::new("/b/node_modules")).unwrap();
+        assert_eq!(row_a.size_bytes, Some(42_000));
+        assert_eq!(row_b.size_bytes, None);
     }
 
     #[test]
@@ -277,5 +366,94 @@ mod tests {
         push(&mut s, "/a/node_modules");
         s.record_delete_outcome(0, true, None);
         assert!(s.last_message.as_deref().unwrap().contains("dry-run"));
+    }
+
+    // ─── Sort toggle behaviour ──────────────────────────────────────────────
+
+    #[test]
+    fn pressing_size_again_flips_direction() {
+        let mut s = fresh_state();
+        assert_eq!(s.sort_direction, SortDirection::Desc);
+        s.apply(Action::ToggleSortBySize);
+        assert_eq!(s.sort, SortBy::Size);
+        assert_eq!(s.sort_direction, SortDirection::Asc);
+        s.apply(Action::ToggleSortBySize);
+        assert_eq!(s.sort_direction, SortDirection::Desc);
+    }
+
+    #[test]
+    fn switching_from_size_to_name_uses_default_asc() {
+        let mut s = fresh_state(); // Size + Desc
+        s.apply(Action::ToggleSortByName);
+        assert_eq!(s.sort, SortBy::Path);
+        assert_eq!(s.sort_direction, SortDirection::Asc);
+    }
+
+    #[test]
+    fn switching_to_last_used_uses_default_desc() {
+        let mut s = fresh_state();
+        s.apply(Action::ToggleSortByName); // somewhere else
+        s.apply(Action::ToggleSortByLastUsed);
+        assert_eq!(s.sort, SortBy::Age);
+        assert_eq!(s.sort_direction, SortDirection::Desc);
+        // Toggling again flips.
+        s.apply(Action::ToggleSortByLastUsed);
+        assert_eq!(s.sort_direction, SortDirection::Asc);
+    }
+
+    #[test]
+    fn resort_keeps_cursor_on_same_row() {
+        let mut s = fresh_state(); // sort=Size desc
+        push(&mut s, "/aaa");
+        push(&mut s, "/bbb");
+        push(&mut s, "/ccc");
+        s.record_size(Path::new("/aaa"), 100);
+        s.record_size(Path::new("/bbb"), 999);
+        s.record_size(Path::new("/ccc"), 500);
+        // Order under Size+Desc: bbb(999), ccc(500), aaa(100).
+        // Put cursor on the middle row (ccc).
+        let ccc_idx = s.results.iter().position(|r| r.path == Path::new("/ccc")).unwrap();
+        s.cursor = ccc_idx;
+        // Flip to Asc.
+        s.apply(Action::ToggleSortBySize);
+        // New order: aaa(100), ccc(500), bbb(999). Cursor should still point to ccc.
+        let new_idx = s.results.iter().position(|r| r.path == Path::new("/ccc")).unwrap();
+        assert_eq!(s.cursor, new_idx);
+    }
+
+    #[test]
+    fn push_keeps_results_sorted() {
+        let mut s = fresh_state();
+        // Push in random order with sizes preset via push then record_size.
+        let scan = |p: &str| ScanFoundFolder::new(PathBuf::from(p), None);
+        s.push_result(scan("/small"));
+        s.record_size(Path::new("/small"), 100);
+        s.push_result(scan("/big"));
+        s.record_size(Path::new("/big"), 10_000);
+        s.push_result(scan("/medium"));
+        s.record_size(Path::new("/medium"), 1_000);
+        // Default Size + Desc → big, medium, small.
+        let paths: Vec<_> =
+            s.results.iter().map(|r| r.path.to_string_lossy().into_owned()).collect();
+        assert_eq!(paths, vec!["/big", "/medium", "/small"]);
+    }
+
+    #[test]
+    fn age_sort_uses_last_modified() {
+        let mut s = fresh_state();
+        let now = SystemTime::now();
+        s.push_result_with_mtime(
+            ScanFoundFolder::new(PathBuf::from("/recent"), None),
+            Some(now - Duration::from_secs(10)),
+        );
+        s.push_result_with_mtime(
+            ScanFoundFolder::new(PathBuf::from("/ancient"), None),
+            Some(now - Duration::from_secs(10_000)),
+        );
+        s.push_result_with_mtime(ScanFoundFolder::new(PathBuf::from("/no-mtime"), None), None);
+        s.apply(Action::ToggleSortByLastUsed); // Age + Desc (newest first)
+        let paths: Vec<_> =
+            s.results.iter().map(|r| r.path.to_string_lossy().into_owned()).collect();
+        assert_eq!(paths, vec!["/recent", "/ancient", "/no-mtime"]);
     }
 }

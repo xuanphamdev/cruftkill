@@ -11,5 +11,5 @@ pub mod tui;
 
 pub use crate::core::error::NpkillError;
 pub use crate::core::types::{
-    DeleteResult, FolderResult, RiskAnalysis, ScanFoundFolder, ScanOptions, SortBy,
+    DeleteResult, FolderResult, RiskAnalysis, ScanFoundFolder, ScanOptions, SortBy, SortDirection,
 };
