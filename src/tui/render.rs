@@ -50,16 +50,41 @@ const LOGO: &[&str] = &[
 /// single-cell, so this equals the character count of the longest line.
 const LOGO_WIDTH: u16 = 25;
 
+/// Height the persistent ASCII logo band wants when there's room for it
+/// (6 logo lines + 1 row of padding above + 1 below = 8).
+const LOGO_BAND_HEIGHT: u16 = (LOGO.len() as u16) + 2;
+
+/// Below this terminal height the logo band is hidden so the table keeps
+/// enough breathing room (status + header + min table = 7 fixed; we want
+/// at least ~10 table rows before yielding 8 to chrome).
+const LOGO_BAND_MIN_TERMINAL_HEIGHT: u16 = 22;
+
 pub fn draw(frame: &mut Frame<'_>, state: &AppState) {
     let area = frame.area();
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(3), Constraint::Length(1)])
-        .split(area);
+    let show_logo_band = area.height >= LOGO_BAND_MIN_TERMINAL_HEIGHT;
+
+    let constraints: Vec<Constraint> = if show_logo_band {
+        vec![
+            Constraint::Length(3),                // header
+            Constraint::Length(LOGO_BAND_HEIGHT), // persistent logo
+            Constraint::Min(3),                   // table / empty state
+            Constraint::Length(1),                // status
+        ]
+    } else {
+        vec![Constraint::Length(3), Constraint::Min(3), Constraint::Length(1)]
+    };
+    let chunks =
+        Layout::default().direction(Direction::Vertical).constraints(constraints).split(area);
 
     draw_header(frame, chunks[0], state);
-    draw_table(frame, chunks[1], state);
-    draw_status(frame, chunks[2], state);
+    let (table_idx, status_idx) = if show_logo_band {
+        draw_logo_band(frame, chunks[1], state);
+        (2, 3)
+    } else {
+        (1, 2)
+    };
+    draw_table(frame, chunks[table_idx], state);
+    draw_status(frame, chunks[status_idx], state);
 
     match &state.mode {
         Mode::Confirm(paths) => {
@@ -69,6 +94,24 @@ pub fn draw(frame: &mut Frame<'_>, state: &AppState) {
             draw_deleting_modal(frame, area, state, progress);
         }
         Mode::Browse => {}
+    }
+}
+
+/// Persistent ASCII logo strip rendered between the header and the results
+/// table. Stays visible at all times so the brand reads even after results
+/// have streamed in and replaced the splash.
+fn draw_logo_band(frame: &mut Frame<'_>, area: Rect, _state: &AppState) {
+    let logo_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    let logo_x = area.x + area.width.saturating_sub(LOGO_WIDTH) / 2;
+    // One blank line above the logo so it doesn't kiss the header border.
+    let top_y = area.y + 1;
+    for (i, line) in LOGO.iter().enumerate() {
+        let y = top_y + i as u16;
+        if y >= area.y + area.height {
+            break;
+        }
+        let rect = Rect { x: logo_x, y, width: LOGO_WIDTH, height: 1 };
+        frame.render_widget(Paragraph::new(Span::styled(*line, logo_style)), rect);
     }
 }
 
@@ -247,31 +290,18 @@ fn draw_table(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     frame.render_stateful_widget(table, area, &mut t_state);
 }
 
-/// Centred ASCII logo + tagline shown while no targets have been found yet.
+/// Centred tagline + hint + optional update banner, shown in the table
+/// area when no targets have been found yet. The ASCII logo itself is
+/// drawn separately by `draw_logo_band` so it stays visible even after
+/// results have arrived.
 fn draw_empty_state(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
-    let logo_height = LOGO.len() as u16;
-    // Logo + blank line + tagline + blank line + hint = logo_height + 4 rows.
-    let full_block = logo_height + 4;
-    // Always try to draw at least the logo itself — only bail when there
-    // genuinely isn't room for any of it. On small terminals we degrade
-    // gracefully by dropping the tagline / hint / banner one by one.
-    if area.height < logo_height {
+    if area.height < 1 {
         return;
     }
+    let block_height = 4u16; // tagline + blank + hint + (optional banner)
+    let top_y = area.y + area.height.saturating_sub(block_height.min(area.height)) / 2;
 
-    let logo_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
-    let logo_x = area.x + area.width.saturating_sub(LOGO_WIDTH) / 2;
-    let top_y = area.y + area.height.saturating_sub(full_block.min(area.height)) / 2;
-    for (i, line) in LOGO.iter().enumerate() {
-        let y = top_y + i as u16;
-        if y >= area.y + area.height {
-            break;
-        }
-        let rect = Rect { x: logo_x, y, width: LOGO_WIDTH, height: 1 };
-        frame.render_widget(Paragraph::new(Span::styled(*line, logo_style)), rect);
-    }
-
-    let tagline_y = top_y + logo_height + 1;
+    let tagline_y = top_y;
     if tagline_y >= area.y + area.height {
         return;
     }
