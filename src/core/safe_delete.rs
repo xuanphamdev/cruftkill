@@ -17,7 +17,7 @@ use std::path::Path;
 ///
 /// ```
 /// use std::path::Path;
-/// use nodemoduleskiller::core::safe_delete::is_safe_to_delete;
+/// use cruftkill::core::safe_delete::is_safe_to_delete;
 ///
 /// assert!(is_safe_to_delete(Path::new("/x/node_modules"), &["node_modules".to_string()]));
 /// assert!(!is_safe_to_delete(Path::new("/x/.cache"), &["node_modules".to_string()]));

@@ -1,4 +1,4 @@
-//! `nmk` binary entry point.
+//! `cft` binary entry point.
 //!
 //! Phase 08 dispatches between the (Phase 07) interactive TUI and the
 //! scriptable `--no-tui` JSON output mode. For v0.1 the TUI is still a stub,
@@ -9,15 +9,15 @@ use std::io::IsTerminal;
 use anyhow::Context;
 use clap::Parser;
 
-use nodemoduleskiller::cli::CliArgs;
-use nodemoduleskiller::tui;
+use cruftkill::cli::CliArgs;
+use cruftkill::tui;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
     let args = CliArgs::parse();
 
     if let Some(unknown) = args.unknown_profile() {
-        anyhow::bail!("unknown profile: {unknown}. Run `nmk --help` for the list.");
+        anyhow::bail!("unknown profile: {unknown}. Run `cft --help` for the list.");
     }
 
     // Auto-fallback to no-tui when stdout is not a real terminal (e.g., piped or CI).
@@ -27,7 +27,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run_no_tui(args: CliArgs) -> anyhow::Result<()> {
-    use nodemoduleskiller::core::{risk, scanner, size, types::ScanOptions};
+    use cruftkill::core::{risk, scanner, size, types::ScanOptions};
 
     let root = args.root_path()?;
     let targets = args.resolved_targets();

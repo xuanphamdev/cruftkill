@@ -29,7 +29,7 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-use crate::core::error::NpkillError;
+use crate::core::error::CruftError;
 
 /// Per-folder timeout, matching npkill's `SIZE_TIMEOUT_MS`.
 pub const SIZE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -43,9 +43,9 @@ pub const SIZE_TIMEOUT: Duration = Duration::from_secs(60);
 /// platforms, returns the sum of logical file sizes. Directory entries
 /// themselves contribute a flat 4096 bytes (inode block estimate).
 ///
-/// Returns `NpkillError::SizeTimeout` if the walk does not complete in
+/// Returns `CruftError::SizeTimeout` if the walk does not complete in
 /// [`SIZE_TIMEOUT`]. Returns `Ok(0)` if `path` is missing or unreadable.
-pub async fn get_folder_size(path: PathBuf) -> Result<u64, NpkillError> {
+pub async fn get_folder_size(path: PathBuf) -> Result<u64, CruftError> {
     let total = Arc::new(AtomicU64::new(0));
     let pending = Arc::new(AtomicUsize::new(1));
     let (done_tx, done_rx) = oneshot::channel();
@@ -62,7 +62,7 @@ pub async fn get_folder_size(path: PathBuf) -> Result<u64, NpkillError> {
 
     let result = match tokio::time::timeout(SIZE_TIMEOUT, done_rx).await {
         Ok(_) => Ok(total.load(Ordering::SeqCst)),
-        Err(_) => Err(NpkillError::SizeTimeout(path)),
+        Err(_) => Err(CruftError::SizeTimeout(path)),
     };
     // If we timed out, signal walkers to stop. If we completed naturally,
     // cancel is a no-op since no walkers are still running.

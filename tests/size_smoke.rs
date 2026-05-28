@@ -11,7 +11,7 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 
-use nodemoduleskiller::core::size;
+use cruftkill::core::size;
 
 fn write_file(path: &PathBuf, bytes: &[u8]) {
     if let Some(parent) = path.parent() {

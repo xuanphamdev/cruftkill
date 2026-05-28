@@ -14,8 +14,8 @@ use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use nodemoduleskiller::ScanOptions;
-use nodemoduleskiller::core::scanner;
+use cruftkill::ScanOptions;
+use cruftkill::core::scanner;
 
 fn touch_dir(p: &PathBuf) {
     fs::create_dir_all(p).expect("create dir");
@@ -30,9 +30,7 @@ fn opts(targets: &[&str], exclude: &[&str]) -> ScanOptions {
     }
 }
 
-async fn drain(
-    rx: &mut tokio::sync::mpsc::Receiver<nodemoduleskiller::ScanFoundFolder>,
-) -> Vec<PathBuf> {
+async fn drain(rx: &mut tokio::sync::mpsc::Receiver<cruftkill::ScanFoundFolder>) -> Vec<PathBuf> {
     let mut out = Vec::new();
     while let Some(f) = rx.recv().await {
         out.push(f.path);

@@ -1,4 +1,4 @@
-//! CLI argument parsing for the `nmk` binary.
+//! CLI argument parsing for the `cft` binary.
 //!
 //! Phase 08 expands Phase 01's stub into the full surface: profile + target +
 //! exclude lists, sort criterion, risk-analysis toggle, dry-run, no-tui JSON
@@ -12,10 +12,10 @@ use clap::{ArgAction, Parser, ValueEnum};
 use crate::core::profiles::{DEFAULT_PROFILE, profile_names};
 use crate::core::types::SortBy;
 
-/// `nmk` — find and delete `node_modules` (and other build-cache folders).
+/// `cft` — find and delete `node_modules` (and other build-cache folders).
 #[derive(Debug, Parser)]
 #[command(
-    name = "nmk",
+    name = "cft",
     version,
     about = "Find and delete node_modules and friends",
     long_about = None,
@@ -114,7 +114,7 @@ mod tests {
 
     #[test]
     fn parses_with_no_args() {
-        let args = CliArgs::try_parse_from(["nmk"]).unwrap();
+        let args = CliArgs::try_parse_from(["cft"]).unwrap();
         assert!(args.root.is_none());
         assert!(!args.dry_run);
         assert!(!args.no_tui);
@@ -123,44 +123,44 @@ mod tests {
 
     #[test]
     fn parses_root_positional() {
-        let args = CliArgs::try_parse_from(["nmk", "/tmp/scan"]).unwrap();
+        let args = CliArgs::try_parse_from(["cft", "/tmp/scan"]).unwrap();
         assert_eq!(args.root, Some(PathBuf::from("/tmp/scan")));
     }
 
     #[test]
     fn parses_dry_run_flag() {
-        let args = CliArgs::try_parse_from(["nmk", "--dry-run"]).unwrap();
+        let args = CliArgs::try_parse_from(["cft", "--dry-run"]).unwrap();
         assert!(args.dry_run);
     }
 
     #[test]
     fn parses_no_tui_flag() {
-        let args = CliArgs::try_parse_from(["nmk", "--no-tui"]).unwrap();
+        let args = CliArgs::try_parse_from(["cft", "--no-tui"]).unwrap();
         assert!(args.no_tui);
     }
 
     #[test]
     fn parses_multiple_profiles() {
-        let args = CliArgs::try_parse_from(["nmk", "-p", "node", "-p", "python"]).unwrap();
+        let args = CliArgs::try_parse_from(["cft", "-p", "node", "-p", "python"]).unwrap();
         assert_eq!(args.profile, vec!["node", "python"]);
     }
 
     #[test]
     fn parses_sort_age() {
-        let args = CliArgs::try_parse_from(["nmk", "-s", "age"]).unwrap();
+        let args = CliArgs::try_parse_from(["cft", "-s", "age"]).unwrap();
         assert!(matches!(args.sort, SortArg::Age));
     }
 
     #[test]
     fn default_profile_when_none_passed() {
-        let args = CliArgs::try_parse_from(["nmk"]).unwrap();
+        let args = CliArgs::try_parse_from(["cft"]).unwrap();
         let t = args.resolved_targets();
         assert!(t.contains(&"node_modules".to_string()));
     }
 
     #[test]
     fn extra_targets_merged() {
-        let args = CliArgs::try_parse_from(["nmk", "-p", "node", "-t", "extra_dir"]).unwrap();
+        let args = CliArgs::try_parse_from(["cft", "-p", "node", "-t", "extra_dir"]).unwrap();
         let t = args.resolved_targets();
         assert!(t.contains(&"extra_dir".to_string()));
         assert!(t.contains(&"node_modules".to_string()));
@@ -168,13 +168,13 @@ mod tests {
 
     #[test]
     fn unknown_profile_detected() {
-        let args = CliArgs::try_parse_from(["nmk", "-p", "node", "-p", "this-is-fake"]).unwrap();
+        let args = CliArgs::try_parse_from(["cft", "-p", "node", "-p", "this-is-fake"]).unwrap();
         assert_eq!(args.unknown_profile(), Some("this-is-fake"));
     }
 
     #[test]
     fn all_profile_is_recognised() {
-        let args = CliArgs::try_parse_from(["nmk", "-p", "all"]).unwrap();
+        let args = CliArgs::try_parse_from(["cft", "-p", "all"]).unwrap();
         assert!(args.unknown_profile().is_none());
     }
 

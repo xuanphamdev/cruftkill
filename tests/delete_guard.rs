@@ -10,7 +10,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use nodemoduleskiller::core::delete;
+use cruftkill::core::delete;
 
 fn make_tree(root: &Path, name: &str) -> PathBuf {
     let p = root.join(name);

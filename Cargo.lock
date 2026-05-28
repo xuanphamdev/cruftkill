@@ -184,6 +184,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "cruftkill"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "crossterm",
+ "futures",
+ "is-terminal",
+ "num_cpus",
+ "ratatui",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "darling"
 version = "0.20.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -530,24 +548,6 @@ dependencies = [
  "log",
  "wasi",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "nodemoduleskiller"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "crossterm",
- "futures",
- "is-terminal",
- "num_cpus",
- "ratatui",
- "serde_json",
- "tempfile",
- "thiserror",
- "tokio",
- "tokio-util",
 ]
 
 [[package]]

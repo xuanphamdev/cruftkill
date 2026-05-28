@@ -1,12 +1,12 @@
-//! Typed error for the nodemoduleskiller core library.
+//! Typed error for the cruftkill core library.
 //!
-//! Library code returns `Result<T, NpkillError>`. The binary uses
+//! Library code returns `Result<T, CruftError>`. The binary uses
 //! `anyhow::Result` and converts via `?`.
 
 use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
-pub enum NpkillError {
+pub enum CruftError {
     /// A delete or scan path resolves outside its declared root.
     #[error("path is not within scan root: {0}")]
     PathEscape(PathBuf),
@@ -30,28 +30,28 @@ mod tests {
 
     #[test]
     fn path_escape_includes_path_in_message() {
-        let e = NpkillError::PathEscape(PathBuf::from("/etc/passwd"));
+        let e = CruftError::PathEscape(PathBuf::from("/etc/passwd"));
         assert!(e.to_string().contains("/etc/passwd"));
     }
 
     #[test]
     fn invalid_root_includes_reason() {
-        let e = NpkillError::InvalidRoot("does not exist".into());
+        let e = CruftError::InvalidRoot("does not exist".into());
         assert!(e.to_string().contains("does not exist"));
     }
 
     #[test]
     fn size_timeout_includes_path() {
-        let e = NpkillError::SizeTimeout(PathBuf::from("/big/tree"));
+        let e = CruftError::SizeTimeout(PathBuf::from("/big/tree"));
         assert!(e.to_string().contains("/big/tree"));
     }
 
     #[test]
     fn io_error_converts_via_from() {
         let io = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "nope");
-        let e: NpkillError = io.into();
+        let e: CruftError = io.into();
         match e {
-            NpkillError::Io(_) => {}
+            CruftError::Io(_) => {}
             other => panic!("expected Io, got {other:?}"),
         }
     }

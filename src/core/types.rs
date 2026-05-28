@@ -1,4 +1,4 @@
-//! Public data types for the nodemoduleskiller core.
+//! Public data types for the cruftkill core.
 //!
 //! Ported from npkill's `src/core/interfaces/folder.interface.ts` and
 //! `npkill.interface.ts`. Names follow Rust conventions (snake_case fields,

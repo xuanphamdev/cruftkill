@@ -1,4 +1,4 @@
-//! Interactive ratatui-based UI for the `nmk` binary.
+//! Interactive ratatui-based UI for the `cft` binary.
 //!
 //! v0.1 ships a minimal feel: header, results table, status hint, delete
 //! confirm modal, and **interactive sort** via `s` / `n` / `m` keys.

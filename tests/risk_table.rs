@@ -7,8 +7,8 @@
 //! Reason strings are asserted verbatim against npkill's TypeScript source to
 //! catch any future drift between implementations.
 
-use nodemoduleskiller::core::risk::analyze_with_home;
-use nodemoduleskiller::core::safe_delete::is_safe_to_delete;
+use cruftkill::core::risk::analyze_with_home;
+use cruftkill::core::safe_delete::is_safe_to_delete;
 use std::path::Path;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

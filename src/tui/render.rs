@@ -7,7 +7,7 @@
 //!
 //! Layout (top to bottom):
 //! ```text
-//! ▓▓ nmk  ⟶  /home/me/projects                        [dry-run]
+//! ▓▓ cft  ⟶  /home/me/projects                        [dry-run]
 //!   ◆ 12 found   ▼ 1.20 GB total   ⠋ scanning   sort: ▼ size
 //! ──────────────────────────────────────────────────────────────
 //! ▶ ⚠  /home/me/proj-a/node_modules           1.20 GB   2d
@@ -71,7 +71,7 @@ pub fn draw(frame: &mut Frame<'_>, state: &AppState) {
 
 fn draw_header(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let logo =
-        Span::styled(" ▓▓ nmk", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+        Span::styled(" ▓▓ cft", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
     let arrow = Span::styled("  ⟶  ", Style::default().fg(Color::DarkGray));
     let path = Span::styled(state.root.display().to_string(), Style::default().fg(Color::White));
     let mut title_spans = vec![logo, arrow, path];
