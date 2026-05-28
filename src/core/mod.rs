@@ -9,6 +9,7 @@ pub mod delete;
 pub mod error;
 pub mod filter;
 pub mod ignore;
+pub mod metadata;
 pub mod profiles;
 pub mod risk;
 pub mod safe_delete;

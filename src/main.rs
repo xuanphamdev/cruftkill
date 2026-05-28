@@ -27,7 +27,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run_no_tui(args: CliArgs) -> anyhow::Result<()> {
-    use cruftkill::core::{risk, scanner, size, types::ScanOptions};
+    use cruftkill::core::{metadata, scanner, size, types::ScanOptions};
 
     let root = args.root_path()?;
     let targets = args.resolved_targets();
@@ -37,16 +37,12 @@ async fn run_no_tui(args: CliArgs) -> anyhow::Result<()> {
         sort_by: Some(args.sort.into()),
         perform_risk_analysis: !args.no_risk,
     };
-    // Resolve HOME once instead of re-reading the env per result.
-    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).ok();
-    let home_path = home.as_deref().map(std::path::Path::new);
-
     let mut handle = scanner::start_scan(root.clone(), opts);
 
     while let Some(found) = handle.results.recv().await {
         let size_bytes = size::get_folder_size(found.path.clone()).await.unwrap_or(0);
-        let risk_analysis =
-            if args.no_risk { None } else { Some(risk::analyze_with_home(&found.path, home_path)) };
+        let risk_analysis = found.risk_analysis.clone();
+        let result_metadata = metadata::classify_path(&found.path, risk_analysis.as_ref());
         let modified = std::fs::metadata(&found.path)
             .and_then(|m| m.modified())
             .ok()
@@ -54,10 +50,16 @@ async fn run_no_tui(args: CliArgs) -> anyhow::Result<()> {
             .map(|d| d.as_secs());
 
         let line = serde_json::json!({
-            "path": found.path,
+            "path": &found.path,
             "size_bytes": size_bytes,
             "is_sensitive": risk_analysis.as_ref().map(|r| r.is_sensitive).unwrap_or(false),
-            "risk_reason": risk_analysis.and_then(|r| r.reason),
+            "risk_reason": risk_analysis.as_ref().and_then(|r| r.reason.as_ref()),
+            "target_name": result_metadata.target_name.as_ref(),
+            "ecosystems": result_metadata.ecosystems,
+            "category": result_metadata.category.as_json_label(),
+            "delete_risk": result_metadata.delete_risk.as_json_label(),
+            "delete_risk_reason": result_metadata.delete_risk_reason,
+            "rebuild_hint": result_metadata.rebuild_hint,
             "modified_unix": modified,
             "dry_run": args.dry_run,
         });

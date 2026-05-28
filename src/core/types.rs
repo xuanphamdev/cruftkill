@@ -7,6 +7,8 @@
 use std::path::PathBuf;
 use std::time::SystemTime;
 
+use crate::core::metadata::{CruftMetadata, classify_path};
+
 /// Sort criteria for displayed scan results.
 ///
 /// Mirrors npkill's `SortBy = 'path' | 'size' | 'age'`. Comparators in
@@ -132,14 +134,23 @@ pub struct FolderResult {
 
 impl FolderResult {
     pub fn from_scan(found: ScanFoundFolder) -> Self {
+        let ScanFoundFolder { path, risk_analysis } = found;
         Self {
-            path: found.path,
-            risk: found.risk_analysis,
+            path,
+            risk: risk_analysis,
             size_bytes: None,
             last_modified: None,
             selected: false,
             deleted: false,
         }
+    }
+
+    /// Return advisory display metadata for this result.
+    ///
+    /// Deletion safety is still enforced by the delete guards; this metadata
+    /// only explains likely ecosystem, category, risk level, and rebuild hint.
+    pub fn metadata(&self) -> CruftMetadata<'_> {
+        classify_path(&self.path, self.risk.as_ref())
     }
 }
 
@@ -206,6 +217,7 @@ mod tests {
         let r = FolderResult::from_scan(s);
         assert_eq!(r.path, PathBuf::from("/x"));
         assert!(r.risk.is_some());
+        assert_eq!(r.metadata().target_name, "x");
         assert!(r.size_bytes.is_none());
         assert!(r.last_modified.is_none());
         assert!(!r.selected);

@@ -131,6 +131,7 @@
 //!                      ├── scanner       parallel tokio worker pool
 //!                      ├── size          refcounted async sum, 60s timeout
 //!                      ├── risk          pure path classifier
+//!                      ├── metadata      ecosystem/category/delete-risk labels
 //!                      ├── safe_delete   basename guard
 //!                      ├── delete        canonicalize + remove_dir_all
 //!                      ├── profiles      17 ecosystem profiles

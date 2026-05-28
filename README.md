@@ -31,10 +31,12 @@ rewritten in Rust with a parallel async scanner and extended to 17 ecosystems.
 - 🔍 Parallel async directory scanner with `CancellationToken`
 - 📏 True on-disk size per folder (Unix `blocks × 512`)
 - 🛡️ Risk analyzer — flags paths inside `~/.config`, AppData, `.app` bundles
+- 🧭 Per-result metadata — ecosystem, cleanup category, delete-risk verdict,
+  and rebuild hint under each scanned path
 - 🗑️ Safe delete with two-layer guard (basename + canonicalize containment)
 - 🖥️ Two UX modes:
   - **Interactive TUI** (ratatui): navigate, sort by size/name/last-used,
-    delete with confirm, rescan
+    inspect cleanup metadata, delete with confirm, rescan
   - **`--no-tui` mode**: streams NDJSON for scripting / CI pipelines
 
 ## Install
@@ -69,6 +71,13 @@ cft -p all ~/                  # everything everywhere
 cft --dry-run ~/Projects       # preview what would be deleted
 ```
 
+Each result shows a metadata line under the folder path:
+
+```text
+/work/app/.venv                         1.4 GB   3w
+  data-science+python | virtual env | risk: low | Recreate with the project setup or package manager command
+```
+
 Keybinds:
 
 | Key | Action |
@@ -98,10 +107,20 @@ Each line is a JSON object:
   "size_bytes": 314572800,
   "is_sensitive": false,
   "risk_reason": null,
+  "target_name": "node_modules",
+  "ecosystems": ["node"],
+  "category": "dependency-tree",
+  "delete_risk": "low",
+  "delete_risk_reason": "Regenerable cache or build output outside sensitive paths",
+  "rebuild_hint": "Reinstall dependencies before next build",
   "modified_unix": 1779867789,
   "dry_run": false
 }
 ```
+
+Metadata is advisory. Delete confirmation and the safety guards still decide
+what can actually be removed. If risk analysis is disabled, metadata uses a
+medium-risk advisory because sensitive-path checks were skipped.
 
 When stdout is not a TTY (e.g. piped or in CI), `cft` auto-falls-back to
 `--no-tui` mode.

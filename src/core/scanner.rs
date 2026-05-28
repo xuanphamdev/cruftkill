@@ -37,7 +37,8 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::core::ignore::global_ignore;
-use crate::core::types::{RiskAnalysis, ScanFoundFolder, ScanOptions};
+use crate::core::risk;
+use crate::core::types::{ScanFoundFolder, ScanOptions};
 
 /// Maximum number of worker tasks the scanner will spawn.
 pub const MAX_WORKERS: usize = 8;
@@ -78,11 +79,18 @@ struct ScanConfig {
     targets: Vec<String>,
     exclude: Vec<String>,
     perform_risk: bool,
+    home: Option<PathBuf>,
 }
 
 impl From<ScanOptions> for ScanConfig {
     fn from(o: ScanOptions) -> Self {
-        Self { targets: o.targets, exclude: o.exclude, perform_risk: o.perform_risk_analysis }
+        let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).ok();
+        Self {
+            targets: o.targets,
+            exclude: o.exclude,
+            perform_risk: o.perform_risk_analysis,
+            home: home.map(PathBuf::from),
+        }
     }
 }
 
@@ -245,7 +253,10 @@ async fn explore_dir(path: PathBuf, h: &WorkerHandles) {
         }
 
         if is_target {
-            let risk = h.cfg.perform_risk.then(RiskAnalysis::safe);
+            let risk = h
+                .cfg
+                .perform_risk
+                .then(|| risk::analyze_with_home(&subpath, h.cfg.home.as_deref()));
             // Result channel is bounded — wrap in cancel select so we can
             // bail out promptly if the consumer dropped or the scan was
             // cancelled mid-send.

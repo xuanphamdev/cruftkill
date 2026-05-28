@@ -32,7 +32,7 @@ use tokio::sync::mpsc;
 
 use crate::cli::CliArgs;
 use crate::core::types::{ScanOptions, SortBy};
-use crate::core::{delete, risk, scanner, size};
+use crate::core::{delete, scanner, size};
 
 use self::app::{Action, AppState, Effect, Mode, UpdateStatus};
 
@@ -83,9 +83,6 @@ pub async fn run(args: CliArgs) -> anyhow::Result<()> {
     // Default direction comes from `SortDirection::default()` = Desc, which
     // happens to match the user's expectation for the default Size sort.
     let mut state = AppState::new(root.clone(), targets.clone(), dry_run, sort);
-
-    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).ok();
-    let home_path = home.as_deref().map(std::path::PathBuf::from);
 
     let mut handle = scanner::start_scan(root.clone(), make_opts());
 
@@ -169,12 +166,6 @@ pub async fn run(args: CliArgs) -> anyhow::Result<()> {
             }
 
             Some(found) = handle.results.recv() => {
-                let mut found = found;
-                // Replace the scanner's placeholder safe-by-default with a real
-                // risk analysis using the cached home dir.
-                if !args.no_risk {
-                    found.risk_analysis = Some(risk::analyze_with_home(&found.path, home_path.as_deref()));
-                }
                 // Synchronously stat the folder so the Age sort works as soon
                 // as the row appears. Single syscall — cheap.
                 let mtime = std::fs::metadata(&found.path).and_then(|m| m.modified()).ok();

@@ -24,11 +24,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, TableState,
 };
 
+use crate::core::metadata::DeleteRiskLevel;
 use crate::core::types::{FolderResult, SortBy};
 use crate::tui::app::{AppState, Mode, UpdateStatus};
 
@@ -241,7 +242,10 @@ fn draw_table(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             } else {
                 Style::default().fg(Color::White)
             };
-            let path_span = Span::styled(r.path.display().to_string(), path_style);
+            let path_cell = Cell::from(Text::from(vec![
+                Line::from(Span::styled(r.path.display().to_string(), path_style)),
+                metadata_line(r),
+            ]));
 
             let (size_text, size_style_v) = match r.size_bytes {
                 Some(b) => (human_bytes(b), size_style(b)),
@@ -256,12 +260,19 @@ fn draw_table(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             };
 
             Row::new(vec![
-                Cell::from(select_marker),
-                Cell::from(risk_marker),
-                Cell::from(path_span),
-                Cell::from(Span::styled(size_text, size_style_v)),
-                Cell::from(Span::styled(age_text, age_style)),
+                Cell::from(Text::from(vec![Line::from(select_marker), Line::from("")])),
+                Cell::from(Text::from(vec![Line::from(risk_marker), Line::from("")])),
+                path_cell,
+                Cell::from(Text::from(vec![
+                    Line::from(Span::styled(size_text, size_style_v)),
+                    Line::from(""),
+                ])),
+                Cell::from(Text::from(vec![
+                    Line::from(Span::styled(age_text, age_style)),
+                    Line::from(""),
+                ])),
             ])
+            .height(2)
         })
         .collect();
 
@@ -288,6 +299,38 @@ fn draw_table(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     }
 
     frame.render_stateful_widget(table, area, &mut t_state);
+}
+
+fn metadata_line(result: &FolderResult) -> Line<'_> {
+    let metadata = result.metadata();
+    let dim = Style::default().fg(Color::DarkGray);
+    let ecosystem_style = Style::default().fg(Color::Cyan);
+    let risk_style = match metadata.delete_risk {
+        DeleteRiskLevel::Low => Style::default().fg(Color::Green),
+        DeleteRiskLevel::Medium => Style::default().fg(Color::Yellow),
+        DeleteRiskLevel::High => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+    };
+    let ecosystems = if metadata.ecosystems.is_empty() {
+        "custom".to_string()
+    } else {
+        metadata.ecosystems.join("+")
+    };
+    let hint = if metadata.delete_risk == DeleteRiskLevel::High {
+        metadata.delete_risk_reason
+    } else {
+        metadata.rebuild_hint.unwrap_or(metadata.delete_risk_reason)
+    };
+
+    Line::from(vec![
+        Span::styled("  ", dim),
+        Span::styled(ecosystems, ecosystem_style),
+        Span::styled(" | ", dim),
+        Span::styled(metadata.category.display_label(), dim),
+        Span::styled(" | risk: ", dim),
+        Span::styled(metadata.delete_risk.display_label(), risk_style),
+        Span::styled(" | ", dim),
+        Span::styled(hint, dim),
+    ])
 }
 
 /// Centred tagline + hint + optional update banner, shown in the table
