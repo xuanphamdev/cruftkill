@@ -98,8 +98,8 @@ pub async fn run(args: CliArgs) -> anyhow::Result<()> {
     let mut size_requested: HashSet<PathBuf> = HashSet::new();
     let (size_tx, mut size_rx) = mpsc::channel::<(PathBuf, u64)>(256);
 
-    // Delete-outcome pipeline.
-    let (del_tx, mut del_rx) = mpsc::channel::<(usize, bool, Option<String>)>(32);
+    // Delete-outcome pipeline (path-based — index-stable across re-sort).
+    let (del_tx, mut del_rx) = mpsc::channel::<(PathBuf, bool, Option<String>)>(64);
 
     loop {
         // Draw current state.
@@ -134,14 +134,19 @@ pub async fn run(args: CliArgs) -> anyhow::Result<()> {
                             handle.cancel.cancel();
                             break;
                         }
-                        Effect::DeleteFolder { index, path } => {
-                            let scan_root = state.root.clone();
-                            let targets = state.targets.clone();
-                            let tx = del_tx.clone();
-                            tokio::spawn(async move {
-                                let res = delete::delete(&path, &scan_root, &targets, dry_run).await;
-                                let _ = tx.send((index, res.success, res.error)).await;
-                            });
+                        Effect::DeleteBatch(paths) => {
+                            // One tokio task per path. Outcomes flow back via
+                            // the shared del_tx, and AppState's batch counter
+                            // closes the modal once all of them report.
+                            for path in paths {
+                                let scan_root = state.root.clone();
+                                let targets = state.targets.clone();
+                                let tx = del_tx.clone();
+                                tokio::spawn(async move {
+                                    let res = delete::delete(&path, &scan_root, &targets, dry_run).await;
+                                    let _ = tx.send((path, res.success, res.error)).await;
+                                });
+                            }
                         }
                         Effect::Rescan => {
                             // Cancel current scan; the channel will drain to None on the
@@ -174,8 +179,8 @@ pub async fn run(args: CliArgs) -> anyhow::Result<()> {
                 state.record_size(&path, sz);
             }
 
-            Some((idx, ok, err)) = del_rx.recv() => {
-                state.record_delete_outcome(idx, ok, err);
+            Some((path, ok, err)) = del_rx.recv() => {
+                state.record_delete_outcome(&path, ok, err);
             }
 
             else => {
@@ -229,7 +234,11 @@ fn map_key(k: KeyEvent, mode: &Mode) -> Action {
         KeyCode::Up | KeyCode::Char('k') => Action::Up,
         KeyCode::Down | KeyCode::Char('j') => Action::Down,
         KeyCode::Char('q') => Action::Quit,
-        KeyCode::Char('d') | KeyCode::Char(' ') | KeyCode::Enter => Action::RequestDelete,
+        // Space toggles selection. Enter / d opens the confirm modal,
+        // operating on the multi-selection if any, else the cursor row.
+        KeyCode::Char(' ') => Action::ToggleSelect,
+        KeyCode::Char('d') | KeyCode::Enter => Action::RequestDelete,
+        KeyCode::Esc => Action::ClearSelection,
         KeyCode::Char('s') | KeyCode::Char('S') => Action::ToggleSortBySize,
         KeyCode::Char('n') | KeyCode::Char('N') => Action::ToggleSortByName,
         KeyCode::Char('m') | KeyCode::Char('M') => Action::ToggleSortByLastUsed,
@@ -257,7 +266,13 @@ mod tests {
         assert_eq!(map_key(key(KeyCode::Char('q')), &m), Action::Quit);
         assert_eq!(map_key(key(KeyCode::Char('d')), &m), Action::RequestDelete);
         assert_eq!(map_key(key(KeyCode::Enter), &m), Action::RequestDelete);
-        assert_eq!(map_key(key(KeyCode::Char(' ')), &m), Action::RequestDelete);
+    }
+
+    #[test]
+    fn browse_mode_selection_keys() {
+        let m = Mode::Browse;
+        assert_eq!(map_key(key(KeyCode::Char(' ')), &m), Action::ToggleSelect);
+        assert_eq!(map_key(key(KeyCode::Esc), &m), Action::ClearSelection);
     }
 
     #[test]
@@ -276,9 +291,13 @@ mod tests {
         assert_eq!(map_key(key(KeyCode::F(5)), &m), Action::Rescan);
     }
 
+    fn confirm_mode_with_path(p: &str) -> Mode {
+        Mode::Confirm(vec![PathBuf::from(p)])
+    }
+
     #[test]
     fn confirm_mode_only_yes_no_esc() {
-        let m = Mode::Confirm(0);
+        let m = confirm_mode_with_path("/x/node_modules");
         assert_eq!(map_key(key(KeyCode::Char('y')), &m), Action::ConfirmYes);
         assert_eq!(map_key(key(KeyCode::Char('Y')), &m), Action::ConfirmYes);
         assert_eq!(map_key(key(KeyCode::Char('n')), &m), Action::ConfirmNo);
@@ -293,7 +312,7 @@ mod tests {
     fn ctrl_c_quits_in_any_mode() {
         let k = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert_eq!(map_key(k, &Mode::Browse), Action::Quit);
-        assert_eq!(map_key(k, &Mode::Confirm(0)), Action::Quit);
+        assert_eq!(map_key(k, &confirm_mode_with_path("/x")), Action::Quit);
     }
 
     #[test]

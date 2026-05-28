@@ -19,12 +19,34 @@ use crate::core::types::{FolderResult, ScanFoundFolder, SortBy, SortDirection};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mode {
     Browse,
-    /// Awaiting Y/N on deleting the row at this cursor index.
-    Confirm(usize),
-    /// Delete confirmed; waiting for the filesystem operation to complete.
-    /// The modal stays open with a spinner so the user knows the app is
-    /// working — large `node_modules` trees can take several seconds.
-    Deleting(usize),
+    /// Awaiting Y/N on deleting one-or-more folders. Holds the path list so
+    /// the operation is index-stable even if the results vec re-sorts.
+    Confirm(Vec<PathBuf>),
+    /// Delete confirmed; waiting for filesystem operations to complete.
+    /// The modal stays open with a spinner + live progress bar so the user
+    /// knows the app is working — a batch of large `node_modules` trees
+    /// can take many seconds.
+    Deleting(DeleteProgress),
+}
+
+/// Live progress for an in-flight batch delete. Updated on each
+/// `record_delete_outcome` call until `done()` flips true.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteProgress {
+    pub total: usize,
+    pub completed: usize,
+    pub failed: usize,
+    /// Sum of `size_bytes` of every successfully deleted row.
+    pub bytes_done: u64,
+}
+
+impl DeleteProgress {
+    pub fn new(total: usize) -> Self {
+        Self { total, completed: 0, failed: 0, bytes_done: 0 }
+    }
+    pub fn done(&self) -> bool {
+        self.completed + self.failed >= self.total
+    }
 }
 
 /// All UI-visible state.
@@ -109,6 +131,33 @@ impl AppState {
     pub fn selected(&self) -> Option<&FolderResult> {
         self.results.get(self.cursor)
     }
+
+    /// Number of rows the user has multi-selected via Space.
+    pub fn selection_count(&self) -> usize {
+        self.results.iter().filter(|r| r.selected && !r.deleted).count()
+    }
+
+    /// Total size of the multi-selected rows (rows missing size contribute 0).
+    pub fn selection_bytes(&self) -> u64 {
+        self.results.iter().filter(|r| r.selected && !r.deleted).filter_map(|r| r.size_bytes).sum()
+    }
+
+    /// Resolve "what does the next delete operate on?".
+    ///
+    /// - if any rows are selected → those rows
+    /// - otherwise → the cursor row (single-row delete, classic behaviour)
+    /// - already-deleted rows are filtered out
+    pub fn pending_delete_targets(&self) -> Vec<PathBuf> {
+        if self.selection_count() > 0 {
+            self.results
+                .iter()
+                .filter(|r| r.selected && !r.deleted)
+                .map(|r| r.path.clone())
+                .collect()
+        } else {
+            self.selected().filter(|r| !r.deleted).map(|r| vec![r.path.clone()]).unwrap_or_default()
+        }
+    }
 }
 
 /// User intent. Translated by `apply` into state changes + optional side effect.
@@ -116,7 +165,12 @@ impl AppState {
 pub enum Action {
     Up,
     Down,
-    /// Open the confirm prompt for the currently-selected row.
+    /// Toggle selection on the row under the cursor (multi-select).
+    ToggleSelect,
+    /// Clear every selection. Useful as an Esc-out without leaving the app.
+    ClearSelection,
+    /// Open the delete confirm modal. Targets the current selection if any,
+    /// else just the cursor row.
     RequestDelete,
     ConfirmYes,
     ConfirmNo,
@@ -138,11 +192,9 @@ pub enum Action {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
     /// Perform the actual delete on the FS, then call back into the reducer
-    /// via `record_delete_outcome`.
-    DeleteFolder {
-        index: usize,
-        path: PathBuf,
-    },
+    /// via `record_delete_outcome`. Path-based (not index) so the operation
+    /// is stable under concurrent removal / re-sort.
+    DeleteBatch(Vec<PathBuf>),
     /// Tear down the TUI and exit.
     Quit,
     /// Cancel the current scan and start a new one with the same options.
@@ -170,28 +222,41 @@ impl AppState {
                 }
                 Effect::None
             }
-            Action::RequestDelete => {
+            Action::ToggleSelect => {
                 if self.mode == Mode::Browse
-                    && let Some(r) = self.results.get(self.cursor)
-                    && !r.deleted
+                    && let Some(row) = self.results.get_mut(self.cursor)
+                    && !row.deleted
                 {
-                    self.mode = Mode::Confirm(self.cursor);
+                    row.selected = !row.selected;
+                }
+                Effect::None
+            }
+            Action::ClearSelection => {
+                if self.mode == Mode::Browse {
+                    for r in &mut self.results {
+                        r.selected = false;
+                    }
+                }
+                Effect::None
+            }
+            Action::RequestDelete => {
+                if self.mode == Mode::Browse {
+                    let targets = self.pending_delete_targets();
+                    if !targets.is_empty() {
+                        self.mode = Mode::Confirm(targets);
+                    }
                 }
                 Effect::None
             }
             Action::ConfirmYes => match self.mode.clone() {
-                Mode::Confirm(idx) => {
-                    if let Some(r) = self.results.get(idx) {
-                        // Switch to Deleting so the modal stays open with a
-                        // spinner until `record_delete_outcome` lands.
-                        self.mode = Mode::Deleting(idx);
-                        Effect::DeleteFolder { index: idx, path: r.path.clone() }
-                    } else {
-                        self.mode = Mode::Browse;
-                        Effect::None
-                    }
+                Mode::Confirm(paths) if !paths.is_empty() => {
+                    self.mode = Mode::Deleting(DeleteProgress::new(paths.len()));
+                    Effect::DeleteBatch(paths)
                 }
-                _ => Effect::None,
+                _ => {
+                    self.mode = Mode::Browse;
+                    Effect::None
+                }
             },
             Action::ConfirmNo => {
                 if matches!(self.mode, Mode::Confirm(_)) {
@@ -302,35 +367,85 @@ impl AppState {
         }
     }
 
-    /// Update a row after a delete attempt completes.
+    /// Record the outcome of a single path's delete attempt and update the
+    /// modal-stage progress counter if we're mid-batch.
     ///
     /// - **Real-delete success**: remove the row entirely so the user sees
-    ///   the freed space drop off the list. Cursor is clamped if needed.
-    /// - **Dry-run success**: keep the row but mark `deleted` so the
-    ///   strike-through ✗ icon shows; the user can still see what would
+    ///   the freed space drop off the list. Cursor clamps if needed.
+    /// - **Dry-run success**: keep the row but mark `deleted` so the ✗
+    ///   strike-through icon shows; the user can still see what would
     ///   have been removed.
-    /// - **Failure**: keep the row exactly as it was, surface the error
-    ///   message in the status bar.
+    /// - **Failure**: keep the row exactly as it was; the failing path is
+    ///   collected into the status message.
     ///
-    /// Always closes the modal (Mode → Browse) so the user can keep going.
-    pub fn record_delete_outcome(&mut self, index: usize, success: bool, error: Option<String>) {
-        self.mode = Mode::Browse;
-        if success {
-            if self.dry_run {
-                if let Some(row) = self.results.get_mut(index) {
-                    row.deleted = true;
+    /// Closes the modal once every batched delete has reported back.
+    pub fn record_delete_outcome(
+        &mut self,
+        path: &std::path::Path,
+        success: bool,
+        error: Option<String>,
+    ) {
+        let idx = self.results.iter().position(|r| r.path == path);
+        let size = idx.and_then(|i| self.results[i].size_bytes);
+
+        if let Some(i) = idx {
+            if success {
+                if self.dry_run {
+                    self.results[i].deleted = true;
+                    self.results[i].selected = false;
+                } else {
+                    self.results.remove(i);
+                    if !self.results.is_empty() && self.cursor >= self.results.len() {
+                        self.cursor = self.results.len() - 1;
+                    }
                 }
-                self.last_message = Some("(dry-run) would have deleted".into());
-            } else if index < self.results.len() {
-                self.results.remove(index);
-                if !self.results.is_empty() && self.cursor >= self.results.len() {
-                    self.cursor = self.results.len() - 1;
-                }
-                self.last_message = Some("deleted".into());
+            } else {
+                // Keep the row but drop its selected flag — the user
+                // probably doesn't want to retry the same failure with
+                // one more Enter press.
+                self.results[i].selected = false;
             }
-        } else {
-            let msg = error.unwrap_or_else(|| "unknown error".into());
+        }
+
+        // Track first error to surface to the user later.
+        if !success && error.is_some() {
+            // Stash on last_message right now so single-shot deletes still
+            // see the error even though the batch only has one item.
+            let msg = error.clone().unwrap_or_else(|| "unknown error".into());
             self.last_message = Some(format!("delete failed: {msg}"));
+        }
+
+        // Update the batch progress and decide whether to close the modal.
+        if let Mode::Deleting(prog) = &mut self.mode {
+            if success {
+                prog.completed += 1;
+                if let Some(sz) = size {
+                    prog.bytes_done = prog.bytes_done.saturating_add(sz);
+                }
+            } else {
+                prog.failed += 1;
+            }
+            if prog.done() {
+                let (completed, failed, total) = (prog.completed, prog.failed, prog.total);
+                self.mode = Mode::Browse;
+                // Only overwrite `last_message` with a batch summary when we
+                // have something more interesting to say than a single-item
+                // error. Single-item failure keeps the per-item message we
+                // already set above.
+                if total > 1 {
+                    self.last_message = Some(if failed == 0 {
+                        format!("deleted {completed} folders")
+                    } else {
+                        format!("{completed}/{total} deleted · {failed} failed")
+                    });
+                } else if failed == 0 {
+                    self.last_message = Some(if self.dry_run {
+                        "(dry-run) would have deleted".into()
+                    } else {
+                        "deleted".into()
+                    });
+                }
+            }
         }
     }
 
@@ -385,23 +500,21 @@ mod tests {
     }
 
     #[test]
-    fn delete_flow_yes_emits_effect_and_stays_in_deleting_until_outcome() {
+    fn single_delete_emits_one_path_batch_and_stays_in_deleting() {
         let mut s = fresh_state();
         push(&mut s, "/a/node_modules");
         s.apply(Action::RequestDelete);
-        assert_eq!(s.mode, Mode::Confirm(0));
+        assert_eq!(s.mode, Mode::Confirm(vec![PathBuf::from("/a/node_modules")]));
         let eff = s.apply(Action::ConfirmYes);
         match eff {
-            Effect::DeleteFolder { index, path } => {
-                assert_eq!(index, 0);
-                assert_eq!(path, PathBuf::from("/a/node_modules"));
+            Effect::DeleteBatch(paths) => {
+                assert_eq!(paths, vec![PathBuf::from("/a/node_modules")]);
             }
-            other => panic!("expected DeleteFolder, got {other:?}"),
+            other => panic!("expected DeleteBatch, got {other:?}"),
         }
         // Modal stays open with the spinner while the FS op runs.
-        assert_eq!(s.mode, Mode::Deleting(0));
-        // Outcome arrives — modal closes, real-delete success removes the row.
-        s.record_delete_outcome(0, true, None);
+        assert!(matches!(s.mode, Mode::Deleting(_)));
+        s.record_delete_outcome(Path::new("/a/node_modules"), true, None);
         assert_eq!(s.mode, Mode::Browse);
         assert!(s.results.is_empty(), "real-delete success should drop the row");
         assert_eq!(s.last_message.as_deref(), Some("deleted"));
@@ -413,12 +526,12 @@ mod tests {
         push(&mut s, "/a/node_modules");
         s.apply(Action::RequestDelete);
         s.apply(Action::ConfirmYes);
-        assert_eq!(s.mode, Mode::Deleting(0));
-        s.record_delete_outcome(0, false, Some("permission denied".into()));
+        assert!(matches!(s.mode, Mode::Deleting(_)));
+        s.record_delete_outcome(Path::new("/a/node_modules"), false, Some("perm denied".into()));
         assert_eq!(s.mode, Mode::Browse);
         assert_eq!(s.results.len(), 1, "failed delete must leave the row visible");
         assert!(
-            s.last_message.as_deref().unwrap().contains("permission denied"),
+            s.last_message.as_deref().unwrap().contains("perm denied"),
             "got {:?}",
             s.last_message
         );
@@ -431,7 +544,7 @@ mod tests {
         push(&mut s, "/a/node_modules");
         s.apply(Action::RequestDelete);
         s.apply(Action::ConfirmYes);
-        s.record_delete_outcome(0, true, None);
+        s.record_delete_outcome(Path::new("/a/node_modules"), true, None);
         assert_eq!(s.results.len(), 1, "dry-run never deletes; row stays");
         assert!(s.results[0].deleted, "dry-run still marks the row visually");
         assert!(s.last_message.as_deref().unwrap().contains("dry-run"));
@@ -443,14 +556,13 @@ mod tests {
         push(&mut s, "/a/node_modules");
         push(&mut s, "/b/node_modules");
         push(&mut s, "/c/node_modules");
-        // Move cursor to the last row.
         s.apply(Action::Down);
         s.apply(Action::Down);
         assert_eq!(s.cursor, 2);
-        // Delete it.
+        // Delete the row under the cursor (path c).
         s.apply(Action::RequestDelete);
         s.apply(Action::ConfirmYes);
-        s.record_delete_outcome(2, true, None);
+        s.record_delete_outcome(Path::new("/c/node_modules"), true, None);
         assert_eq!(s.results.len(), 2);
         assert_eq!(s.cursor, 1, "cursor should clamp to the new last row");
     }
@@ -460,7 +572,7 @@ mod tests {
         let mut s = fresh_state();
         push(&mut s, "/a/node_modules");
         s.apply(Action::RequestDelete);
-        assert_eq!(s.mode, Mode::Confirm(0));
+        assert!(matches!(s.mode, Mode::Confirm(_)));
         let eff = s.apply(Action::ConfirmNo);
         assert_eq!(eff, Effect::None);
         assert_eq!(s.mode, Mode::Browse);
@@ -475,15 +587,122 @@ mod tests {
 
     #[test]
     fn cannot_redelete_a_dryrun_deleted_row() {
-        // Real-delete now removes the row entirely; the only way a row can
-        // be visible AND flagged `deleted` is in dry-run mode.
         let mut s = fresh_state();
         s.dry_run = true;
         push(&mut s, "/a/node_modules");
-        s.record_delete_outcome(0, true, None);
+        s.apply(Action::RequestDelete);
+        s.apply(Action::ConfirmYes);
+        s.record_delete_outcome(Path::new("/a/node_modules"), true, None);
         assert!(s.results[0].deleted, "precondition: dry-run leaves row marked");
         s.apply(Action::RequestDelete);
-        assert_eq!(s.mode, Mode::Browse, "should not open confirm for an already-marked row");
+        assert_eq!(s.mode, Mode::Browse, "no targets to delete; modal stays closed");
+    }
+
+    // ─── Multi-select + batch ───────────────────────────────────────────────
+
+    #[test]
+    fn space_toggles_selection_on_cursor_row() {
+        let mut s = fresh_state();
+        push(&mut s, "/a/node_modules");
+        push(&mut s, "/b/node_modules");
+        assert_eq!(s.selection_count(), 0);
+        s.apply(Action::ToggleSelect);
+        assert_eq!(s.selection_count(), 1);
+        s.apply(Action::Down);
+        s.apply(Action::ToggleSelect);
+        assert_eq!(s.selection_count(), 2);
+        s.apply(Action::ToggleSelect); // unselect b
+        assert_eq!(s.selection_count(), 1);
+    }
+
+    #[test]
+    fn clear_selection_unsets_every_row() {
+        let mut s = fresh_state();
+        push(&mut s, "/a");
+        push(&mut s, "/b");
+        s.apply(Action::ToggleSelect);
+        s.apply(Action::Down);
+        s.apply(Action::ToggleSelect);
+        assert_eq!(s.selection_count(), 2);
+        s.apply(Action::ClearSelection);
+        assert_eq!(s.selection_count(), 0);
+    }
+
+    #[test]
+    fn request_delete_uses_selection_when_present() {
+        let mut s = fresh_state();
+        push(&mut s, "/a/node_modules");
+        push(&mut s, "/b/node_modules");
+        push(&mut s, "/c/node_modules");
+        // Select a and c, cursor still on a (index 0) — Selection wins over cursor.
+        s.apply(Action::ToggleSelect); // a
+        s.apply(Action::Down);
+        s.apply(Action::Down);
+        s.apply(Action::ToggleSelect); // c
+        s.apply(Action::Up); // cursor on b (unselected)
+        s.apply(Action::RequestDelete);
+        match &s.mode {
+            Mode::Confirm(paths) => {
+                let strs: Vec<_> = paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+                assert!(strs.contains(&"/a/node_modules".to_string()));
+                assert!(strs.contains(&"/c/node_modules".to_string()));
+                assert!(!strs.contains(&"/b/node_modules".to_string()));
+                assert_eq!(strs.len(), 2);
+            }
+            other => panic!("expected Confirm with 2 paths, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn batch_delete_progress_closes_modal_when_all_done() {
+        let mut s = fresh_state();
+        push(&mut s, "/a/node_modules");
+        push(&mut s, "/b/node_modules");
+        push(&mut s, "/c/node_modules");
+        s.apply(Action::ToggleSelect);
+        s.apply(Action::Down);
+        s.apply(Action::ToggleSelect);
+        s.apply(Action::Down);
+        s.apply(Action::ToggleSelect);
+        assert_eq!(s.selection_count(), 3);
+        s.apply(Action::RequestDelete);
+        let eff = s.apply(Action::ConfirmYes);
+        let Effect::DeleteBatch(paths) = eff else { panic!("expected DeleteBatch") };
+        assert_eq!(paths.len(), 3);
+        // Modal should reflect 3 in flight.
+        match &s.mode {
+            Mode::Deleting(p) => {
+                assert_eq!(p.total, 3);
+                assert_eq!(p.completed, 0);
+            }
+            other => panic!("expected Deleting, got {other:?}"),
+        }
+        // Stream outcomes back one at a time.
+        s.record_delete_outcome(Path::new("/a/node_modules"), true, None);
+        assert!(matches!(s.mode, Mode::Deleting(_)), "modal stays open until all done");
+        s.record_delete_outcome(Path::new("/b/node_modules"), true, None);
+        assert!(matches!(s.mode, Mode::Deleting(_)));
+        s.record_delete_outcome(Path::new("/c/node_modules"), true, None);
+        assert_eq!(s.mode, Mode::Browse);
+        assert!(s.results.is_empty());
+        assert_eq!(s.last_message.as_deref(), Some("deleted 3 folders"));
+    }
+
+    #[test]
+    fn batch_delete_summary_counts_failures() {
+        let mut s = fresh_state();
+        push(&mut s, "/a/node_modules");
+        push(&mut s, "/b/node_modules");
+        s.apply(Action::ToggleSelect);
+        s.apply(Action::Down);
+        s.apply(Action::ToggleSelect);
+        s.apply(Action::RequestDelete);
+        s.apply(Action::ConfirmYes);
+        s.record_delete_outcome(Path::new("/a/node_modules"), true, None);
+        s.record_delete_outcome(Path::new("/b/node_modules"), false, Some("perm".into()));
+        assert_eq!(s.mode, Mode::Browse);
+        assert!(s.last_message.as_deref().unwrap().contains("1/2 deleted"));
+        assert!(s.last_message.as_deref().unwrap().contains("1 failed"));
     }
 
     #[test]
@@ -514,14 +733,8 @@ mod tests {
         assert_eq!(s.apply(Action::Quit), Effect::Quit);
     }
 
-    #[test]
-    fn dry_run_message_after_delete() {
-        let mut s = fresh_state();
-        s.dry_run = true;
-        push(&mut s, "/a/node_modules");
-        s.record_delete_outcome(0, true, None);
-        assert!(s.last_message.as_deref().unwrap().contains("dry-run"));
-    }
+    // (Removed `dry_run_message_after_delete` — covered by the path-based
+    // `dry_run_keeps_row_and_marks_deleted_visually`.)
 
     // ─── Sort toggle behaviour ──────────────────────────────────────────────
 

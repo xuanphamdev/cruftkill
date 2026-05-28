@@ -62,13 +62,11 @@ pub fn draw(frame: &mut Frame<'_>, state: &AppState) {
     draw_status(frame, chunks[2], state);
 
     match &state.mode {
-        Mode::Confirm(idx) => {
-            let row = state.results.get(*idx);
-            draw_confirm_modal(frame, area, state, row);
+        Mode::Confirm(paths) => {
+            draw_confirm_modal(frame, area, state, paths);
         }
-        Mode::Deleting(idx) => {
-            let row = state.results.get(*idx);
-            draw_deleting_modal(frame, area, state, row);
+        Mode::Deleting(progress) => {
+            draw_deleting_modal(frame, area, state, progress);
         }
         Mode::Browse => {}
     }
@@ -155,6 +153,7 @@ fn draw_table(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let header_style = Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD);
     let header = Row::new(vec![
         Cell::from(""),
+        Cell::from(""),
         Cell::from(Span::styled("PATH", header_style)),
         Cell::from(Span::styled("SIZE", header_style)),
         Cell::from(Span::styled("AGE", header_style)),
@@ -165,6 +164,11 @@ fn draw_table(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         .results
         .iter()
         .map(|r| {
+            let select_marker = if r.selected {
+                Span::styled("■", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+            } else {
+                Span::styled(" ", Style::default())
+            };
             let risk_marker = if r.deleted {
                 Span::styled("✗", Style::default().fg(Color::DarkGray))
             } else {
@@ -179,6 +183,8 @@ fn draw_table(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 
             let path_style = if r.deleted {
                 Style::default().fg(Color::DarkGray).add_modifier(Modifier::CROSSED_OUT)
+            } else if r.selected {
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::White)
             };
@@ -197,6 +203,7 @@ fn draw_table(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             };
 
             Row::new(vec![
+                Cell::from(select_marker),
                 Cell::from(risk_marker),
                 Cell::from(path_span),
                 Cell::from(Span::styled(size_text, size_style_v)),
@@ -205,8 +212,13 @@ fn draw_table(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         })
         .collect();
 
-    let widths =
-        [Constraint::Length(2), Constraint::Min(30), Constraint::Length(10), Constraint::Length(6)];
+    let widths = [
+        Constraint::Length(1),  // selected marker
+        Constraint::Length(2),  // risk marker
+        Constraint::Min(30),    // path
+        Constraint::Length(10), // size
+        Constraint::Length(6),  // age
+    ];
 
     let table = Table::new(rows, widths)
         .header(header)
@@ -283,18 +295,44 @@ fn draw_empty_state(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 
 fn draw_status(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let mut spans = match state.mode {
-        Mode::Browse => vec![
-            key_span(" ↑↓ "),
-            label_span("nav  "),
-            key_span("d "),
-            label_span("delete  "),
-            key_span("s/n/m "),
-            label_span("sort  "),
-            key_span("r "),
-            label_span("rescan  "),
-            key_span("q "),
-            label_span("quit"),
-        ],
+        Mode::Browse => {
+            let sel = state.selection_count();
+            if sel > 0 {
+                vec![
+                    Span::styled(
+                        format!(" ■ {sel} selected · {} ", human_bytes(state.selection_bytes())),
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    label_span("  "),
+                    key_span("⏎/d "),
+                    label_span("delete  "),
+                    key_span("Space "),
+                    label_span("toggle  "),
+                    key_span("Esc "),
+                    label_span("clear  "),
+                    key_span("q "),
+                    label_span("quit"),
+                ]
+            } else {
+                vec![
+                    key_span(" ↑↓ "),
+                    label_span("nav  "),
+                    key_span("Space "),
+                    label_span("select  "),
+                    key_span("⏎/d "),
+                    label_span("delete  "),
+                    key_span("s/n/m "),
+                    label_span("sort  "),
+                    key_span("r "),
+                    label_span("rescan  "),
+                    key_span("q "),
+                    label_span("quit"),
+                ]
+            }
+        }
         Mode::Confirm(_) => {
             vec![key_span(" y "), label_span("delete  "), key_span("n/Esc "), label_span("cancel")]
         }
@@ -331,77 +369,94 @@ fn draw_confirm_modal(
     frame: &mut Frame<'_>,
     area: Rect,
     state: &AppState,
-    row: Option<&FolderResult>,
+    paths: &[std::path::PathBuf],
 ) {
     let mut width = area.width.saturating_mul(3) / 5;
-    width = width.clamp(50, area.width.saturating_sub(4).max(50));
-    let height = 12u16.min(area.height);
+    width = width.clamp(54, area.width.saturating_sub(4).max(54));
+    let max_listed = 4usize;
+    let listed = paths.len().min(max_listed) as u16;
+    let extra_rows = if paths.len() > max_listed { 1 } else { 0 };
+    let height = (9 + listed + extra_rows).min(area.height);
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
     let modal = Rect { x, y, width, height };
 
     frame.render_widget(Clear, modal);
 
-    let path = row.map(|r| r.path.display().to_string()).unwrap_or_else(|| "<missing>".into());
-    let size = row.and_then(|r| r.size_bytes).map(human_bytes).unwrap_or_else(|| "—".into());
-    let age = row.map(|r| human_age(r.last_modified)).unwrap_or_else(|| "—".into());
-    let risk_reason = row.and_then(|r| r.risk.as_ref()).and_then(|a| {
-        a.is_sensitive.then(|| a.reason.clone().unwrap_or_else(|| "sensitive path".into()))
-    });
+    // Resolve each path back to its FolderResult so we can show size + risk.
+    let rows: Vec<&FolderResult> =
+        paths.iter().filter_map(|p| state.results.iter().find(|r| &r.path == p)).collect();
+    let total_bytes: u64 = rows.iter().filter_map(|r| r.size_bytes).sum();
+    let any_sensitive = rows.iter().any(|r| r.risk.as_ref().is_some_and(|a| a.is_sensitive));
 
     let title_color = if state.dry_run { Color::Magenta } else { Color::Red };
     let title_style = Style::default().fg(title_color).add_modifier(Modifier::BOLD);
     let title = if state.dry_run {
-        " ⚠  DRY-RUN — preview  ⚠ "
+        format!(" ⚠  DRY-RUN — preview {} folders  ⚠ ", paths.len())
     } else {
-        " ⚠  CONFIRM DELETE  ⚠ "
+        format!(" ⚠  CONFIRM DELETE — {} folder(s)  ⚠ ", paths.len())
     };
 
+    let dim = Style::default().fg(Color::DarkGray);
+    let bold_white = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
     let mut body = vec![
         Line::from(""),
-        Line::from(Span::styled(
-            path,
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
         Line::from(vec![
-            Span::styled("size  ", Style::default().fg(Color::DarkGray)),
-            Span::styled(size, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-            Span::styled("     last used  ", Style::default().fg(Color::DarkGray)),
-            Span::styled(age, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled("total  ", dim),
+            Span::styled(human_bytes(total_bytes), bold_white),
+            Span::styled("    across  ", dim),
+            Span::styled(format!("{}", paths.len()), bold_white),
+            Span::styled("  folder(s)", dim),
         ]),
+        Line::from(""),
     ];
-    if let Some(reason) = risk_reason {
-        body.push(Line::from(vec![
-            Span::styled("⚠ ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            Span::styled(reason, Style::default().fg(Color::Yellow)),
-        ]));
+    for p in paths.iter().take(max_listed) {
+        body.push(Line::from(Span::styled(
+            p.display().to_string(),
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        )));
+    }
+    if paths.len() > max_listed {
+        body.push(Line::from(Span::styled(
+            format!("… and {} more", paths.len() - max_listed),
+            dim,
+        )));
     }
     body.push(Line::from(""));
-    body.push(Line::from(if state.dry_run {
-        Span::styled(
-            "Dry-run mode — filesystem is NOT touched.",
-            Style::default().fg(Color::Magenta),
-        )
+    if any_sensitive {
+        body.push(Line::from(vec![
+            Span::styled("⚠ ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "some paths are flagged sensitive — review before confirming",
+                Style::default().fg(Color::Yellow),
+            ),
+        ]));
     } else {
-        Span::styled(
-            "This will be permanently removed.",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        )
-    }));
+        body.push(Line::from(if state.dry_run {
+            Span::styled(
+                "Dry-run mode — filesystem is NOT touched.",
+                Style::default().fg(Color::Magenta),
+            )
+        } else {
+            Span::styled(
+                "This will be permanently removed.",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            )
+        }));
+    }
     body.push(Line::from(""));
     body.push(Line::from(vec![
-        Span::styled("press ", Style::default().fg(Color::DarkGray)),
+        Span::styled("press ", dim),
         Span::styled(
             " y ",
             Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" confirm  ·  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" confirm  ·  ", dim),
         Span::styled(
             " n / Esc ",
             Style::default().fg(Color::Black).bg(Color::Red).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
+        Span::styled(" cancel", dim),
     ]));
 
     let block = Block::default()
@@ -414,51 +469,62 @@ fn draw_confirm_modal(
     frame.render_widget(p, modal);
 }
 
-/// Loading overlay shown while a delete is in flight. Same double-border
-/// shape as the confirm modal — only the contents change — so the user
-/// sees the modal "morph" smoothly rather than blink off.
+/// Loading overlay shown while a (batch) delete is in flight. Shows live
+/// progress so the user knows the app is working — large trees can take
+/// many seconds, and a batch can span several of them.
 fn draw_deleting_modal(
     frame: &mut Frame<'_>,
     area: Rect,
     state: &AppState,
-    row: Option<&FolderResult>,
+    progress: &crate::tui::app::DeleteProgress,
 ) {
     let mut width = area.width.saturating_mul(3) / 5;
-    width = width.clamp(50, area.width.saturating_sub(4).max(50));
-    let height = 10u16.min(area.height);
+    width = width.clamp(54, area.width.saturating_sub(4).max(54));
+    let height = 11u16.min(area.height);
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
     let modal = Rect { x, y, width, height };
 
     frame.render_widget(Clear, modal);
 
-    let path = row.map(|r| r.path.display().to_string()).unwrap_or_else(|| "<missing>".into());
-    let size = row.and_then(|r| r.size_bytes).map(human_bytes).unwrap_or_else(|| "—".into());
-
     let accent_color = if state.dry_run { Color::Magenta } else { Color::Yellow };
     let title_style = Style::default().fg(accent_color).add_modifier(Modifier::BOLD);
     let title = format!(" {} DELETING…  ", spinner_frame());
 
+    let dim = Style::default().fg(Color::DarkGray);
+    let bold_white = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
+    let done = progress.completed + progress.failed;
+
+    // Render a 20-char ASCII progress bar that fills as outcomes arrive.
+    let bar_width = 30usize;
+    let filled = if progress.total == 0 { 0 } else { bar_width * done / progress.total };
+    let bar: String = std::iter::repeat_n('█', filled)
+        .chain(std::iter::repeat_n('░', bar_width - filled))
+        .collect();
+
     let body = vec![
         Line::from(""),
-        Line::from(Span::styled(
-            path,
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
         Line::from(vec![
-            Span::styled("removing ", Style::default().fg(Color::DarkGray)),
-            Span::styled(size, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-            Span::styled(" — this may take a moment", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{}/{}", done, progress.total), bold_white),
+            Span::styled(" folders  ·  ", dim),
+            Span::styled(human_bytes(progress.bytes_done), bold_white),
+            Span::styled(" reclaimed", dim),
         ]),
         Line::from(""),
-        Line::from(if state.dry_run {
+        Line::from(Span::styled(
+            bar,
+            Style::default().fg(accent_color).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(if progress.failed > 0 {
+            Span::styled(
+                format!("{} failed so far", progress.failed),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            )
+        } else if state.dry_run {
             Span::styled("(dry-run — no filesystem mutation)", Style::default().fg(Color::Magenta))
         } else {
-            Span::styled(
-                "do not interrupt; large trees can take seconds",
-                Style::default().fg(Color::DarkGray),
-            )
+            Span::styled("do not interrupt; large trees can take seconds", dim)
         }),
     ];
 
