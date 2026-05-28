@@ -1,6 +1,6 @@
 [package]
 name = "cruftkill"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2024"
 rust-version = "1.85"
 authors = ["xuanphamdev"]
@@ -40,6 +40,7 @@ is-terminal = "0.4"
 ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
 futures = "0.3"
+update-informer = { version = "1", default-features = false, features = ["crates"] }
 
 [dev-dependencies]
 tempfile = "3"

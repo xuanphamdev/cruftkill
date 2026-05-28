@@ -30,7 +30,7 @@ use ratatui::widgets::{
 };
 
 use crate::core::types::{FolderResult, SortBy};
-use crate::tui::app::{AppState, Mode};
+use crate::tui::app::{AppState, Mode, UpdateStatus};
 
 /// Braille-pattern spinner frames (smoother than ASCII /-\|).
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -84,6 +84,12 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         title_spans.push(Span::styled(
             "   [dry-run]",
             Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD | Modifier::REVERSED),
+        ));
+    }
+    if let UpdateStatus::Available(v) = &state.update_status {
+        title_spans.push(Span::styled(
+            format!("   ↑ v{v} available"),
+            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
         ));
     }
     let title = Line::from(title_spans);
@@ -288,6 +294,38 @@ fn draw_empty_state(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             .alignment(Alignment::Center),
             hint_rect,
         );
+    }
+
+    // Update banner — only shown when crates.io reports a newer version
+    // and there's room below the hint line.
+    if let UpdateStatus::Available(v) = &state.update_status {
+        let banner_y = hint_y + 2;
+        if banner_y + 1 < area.y + area.height {
+            let banner_rect = Rect { x: area.x, y: banner_y, width: area.width, height: 1 };
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(
+                        "  ↑ update available  ",
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::Green)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw("  "),
+                    Span::styled(
+                        format!("v{} → v{v}", env!("CARGO_PKG_VERSION")),
+                        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw("    "),
+                    Span::styled(
+                        "cargo install cruftkill --force",
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]))
+                .alignment(Alignment::Center),
+                banner_rect,
+            );
+        }
     }
 }
 

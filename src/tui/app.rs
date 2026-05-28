@@ -40,6 +40,22 @@ pub struct DeleteProgress {
     pub bytes_done: u64,
 }
 
+/// Result of the background "is there a newer version on crates.io?" check.
+///
+/// Resolved by the main loop's startup task; consumed by the renderer to
+/// decide whether to surface an upgrade banner.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum UpdateStatus {
+    /// We haven't heard back from the registry yet (and may never — the
+    /// network probe runs fire-and-forget).
+    #[default]
+    Checking,
+    /// Crates.io reported the running binary IS the latest published version.
+    UpToDate,
+    /// A newer version exists on crates.io. The string is its bare semver.
+    Available(String),
+}
+
 impl DeleteProgress {
     pub fn new(total: usize) -> Self {
         Self { total, completed: 0, failed: 0, bytes_done: 0 }
@@ -78,6 +94,10 @@ pub struct AppState {
 
     /// Last status / error message shown to the user. Cleared on next action.
     pub last_message: Option<String>,
+
+    /// Background "is there a newer version on crates.io?" probe. Defaults
+    /// to `Checking`; the main loop transitions it once the probe lands.
+    pub update_status: UpdateStatus,
 }
 
 impl AppState {
@@ -106,6 +126,7 @@ impl AppState {
             user_navigated: false,
             dirs_scanned: 0,
             last_message: None,
+            update_status: UpdateStatus::default(),
         }
     }
 
@@ -475,6 +496,22 @@ mod tests {
 
     fn push(state: &mut AppState, p: &str) {
         state.push_result(ScanFoundFolder::new(PathBuf::from(p), None));
+    }
+
+    #[test]
+    fn update_status_defaults_to_checking() {
+        let s = fresh_state();
+        assert_eq!(s.update_status, UpdateStatus::Checking);
+    }
+
+    #[test]
+    fn update_status_available_round_trips() {
+        let mut s = fresh_state();
+        s.update_status = UpdateStatus::Available("9.9.9".into());
+        match &s.update_status {
+            UpdateStatus::Available(v) => assert_eq!(v, "9.9.9"),
+            other => panic!("expected Available, got {other:?}"),
+        }
     }
 
     #[test]

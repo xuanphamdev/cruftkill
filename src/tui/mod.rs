@@ -34,7 +34,7 @@ use crate::cli::CliArgs;
 use crate::core::types::{ScanOptions, SortBy};
 use crate::core::{delete, risk, scanner, size};
 
-use self::app::{Action, AppState, Effect, Mode};
+use self::app::{Action, AppState, Effect, Mode, UpdateStatus};
 
 /// RAII terminal-mode guard: restores the terminal on drop, even during panic.
 struct TerminalGuard {
@@ -100,6 +100,12 @@ pub async fn run(args: CliArgs) -> anyhow::Result<()> {
 
     // Delete-outcome pipeline (path-based — index-stable across re-sort).
     let (del_tx, mut del_rx) = mpsc::channel::<(PathBuf, bool, Option<String>)>(64);
+
+    // Update-check pipeline — query crates.io (cached 24h via update-informer).
+    // Fires once at startup and is fire-and-forget: any failure leaves the
+    // status at `Checking` forever, which the UI treats as "say nothing".
+    let (update_tx, mut update_rx) = mpsc::channel::<UpdateStatus>(1);
+    spawn_update_check(update_tx);
 
     loop {
         // Draw current state.
@@ -183,6 +189,10 @@ pub async fn run(args: CliArgs) -> anyhow::Result<()> {
                 state.record_delete_outcome(&path, ok, err);
             }
 
+            Some(update_status) = update_rx.recv() => {
+                state.update_status = update_status;
+            }
+
             else => {
                 if !state.scan_finished {
                     state.mark_scan_finished();
@@ -202,6 +212,40 @@ pub async fn run(args: CliArgs) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Spawn a background task that queries crates.io for the latest published
+/// version of this crate and reports the outcome over `tx`.
+///
+/// Backed by [`update_informer`], which caches the result for 24 hours in
+/// `~/.cache/update-informer` so subsequent launches are zero-network.
+/// Network failures, missing cache dirs, parse errors — all collapsed to
+/// the silent `UpdateStatus::Checking → no banner` outcome by design: the
+/// app must never block on or be derailed by an unreliable upstream probe.
+fn spawn_update_check(tx: mpsc::Sender<UpdateStatus>) {
+    tokio::task::spawn_blocking(move || {
+        use std::time::Duration;
+        use update_informer::{Check, registry};
+
+        let informer = update_informer::new(
+            registry::Crates,
+            env!("CARGO_PKG_NAME"),
+            env!("CARGO_PKG_VERSION"),
+        )
+        .timeout(Duration::from_secs(3))
+        .interval(Duration::from_secs(24 * 60 * 60));
+
+        let status = match informer.check_version() {
+            Ok(Some(v)) => {
+                UpdateStatus::Available(v.to_string().trim_start_matches('v').to_string())
+            }
+            Ok(None) => UpdateStatus::UpToDate,
+            // Any error — offline, DNS, registry down, rate-limit — stays
+            // silent: leave the field where it started (Checking).
+            Err(_) => return,
+        };
+        let _ = tx.blocking_send(status);
+    });
 }
 
 /// Translate a key press into an [`Action`]. Mode-aware: in `Confirm`, only
