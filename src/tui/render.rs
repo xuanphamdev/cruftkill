@@ -35,6 +35,21 @@ use crate::tui::app::{AppState, Mode};
 /// Braille-pattern spinner frames (smoother than ASCII /-\|).
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+/// "NMK" rendered in ANSI Shadow figlet font. Used as a splash logo while
+/// the scan is still empty.
+const LOGO: &[&str] = &[
+    "███╗   ██╗███╗   ███╗██╗  ██╗",
+    "████╗  ██║████╗ ████║██║ ██╔╝",
+    "██╔██╗ ██║██╔████╔██║█████╔╝ ",
+    "██║╚██╗██║██║╚██╔╝██║██╔═██╗ ",
+    "██║ ╚████║██║ ╚═╝ ██║██║  ██╗",
+    "╚═╝  ╚═══╝╚═╝     ╚═╝╚═╝  ╚═╝",
+];
+
+/// Width (in display columns) of the LOGO above. All ANSI-shadow chars are
+/// single-cell, so this equals the character count of the longest line.
+const LOGO_WIDTH: u16 = 29;
+
 pub fn draw(frame: &mut Frame<'_>, state: &AppState) {
     let area = frame.area();
     let chunks = Layout::default()
@@ -79,23 +94,33 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         SortBy::Age => "last-used",
     };
     let dim = Style::default().fg(Color::DarkGray);
-    let stats = Line::from(vec![
+    let bold_white = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
+    let mut stat_spans = vec![
         Span::raw("  "),
         Span::styled("◆ ", Style::default().fg(Color::Cyan)),
-        Span::styled(
-            format!("{} found", state.results.len()),
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(format!("{}", state.results.len()), bold_white),
+        Span::styled(" found", dim),
         Span::styled("    ", dim),
         Span::styled("▼ ", Style::default().fg(Color::Cyan)),
-        Span::styled(
-            human_bytes(state.total_size()),
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" total", dim),
+        Span::styled(human_bytes(state.releasable_bytes()), bold_white),
+        Span::styled(" releasable", dim),
+    ];
+    if state.saved_bytes() > 0 {
+        stat_spans.extend([
+            Span::styled("    ", dim),
+            Span::styled("✓ ", Style::default().fg(Color::Green)),
+            Span::styled(
+                human_bytes(state.saved_bytes()),
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" saved", dim),
+        ]);
+    }
+    stat_spans.extend([
         Span::styled("    ", dim),
         Span::styled(format!("{state_icon} "), state_style),
         Span::styled(state_label, state_style),
+        Span::styled(format!(" · {} dirs", state.dirs_scanned), dim),
         Span::styled("    ", dim),
         Span::styled("sort ", dim),
         Span::styled(
@@ -103,6 +128,7 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
         ),
     ]);
+    let stats = Line::from(stat_spans);
 
     let p = Paragraph::new(vec![title, stats]).block(
         Block::default()
@@ -112,9 +138,13 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     frame.render_widget(p, area);
 }
 
-// ─── Results table ───────────────────────────────────────────────────────────
+// ─── Results table / empty state ─────────────────────────────────────────────
 
 fn draw_table(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    if state.results.is_empty() {
+        draw_empty_state(frame, area, state);
+        return;
+    }
     let header_style = Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD);
     let header = Row::new(vec![
         Cell::from(""),
@@ -186,6 +216,60 @@ fn draw_table(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     }
 
     frame.render_stateful_widget(table, area, &mut t_state);
+}
+
+/// Centred ASCII logo + tagline shown while no targets have been found yet.
+fn draw_empty_state(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    let logo_height = LOGO.len() as u16;
+    // Logo + blank line + tagline + blank line + hint = logo_height + 4 rows.
+    let block_height = logo_height + 4;
+    if area.height < block_height + 2 {
+        // Terminal too small for the splash; just bail out — the header
+        // already shows progress and the table area will be blank.
+        return;
+    }
+
+    let logo_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    let logo_x = area.x + area.width.saturating_sub(LOGO_WIDTH) / 2;
+    let top_y = area.y + area.height.saturating_sub(block_height) / 2;
+    for (i, line) in LOGO.iter().enumerate() {
+        let rect = Rect { x: logo_x, y: top_y + i as u16, width: LOGO_WIDTH, height: 1 };
+        frame.render_widget(Paragraph::new(Span::styled(*line, logo_style)), rect);
+    }
+
+    let tagline_y = top_y + logo_height + 1;
+    let (tagline, tagline_style) = if state.scan_finished {
+        ("no matching folders found".to_string(), Style::default().fg(Color::DarkGray))
+    } else if state.dirs_scanned == 0 {
+        ("warming up the scanner…".to_string(), Style::default().fg(Color::Yellow))
+    } else {
+        (
+            format!("{} dirs scanned, still looking…", state.dirs_scanned),
+            Style::default().fg(Color::Yellow),
+        )
+    };
+    let tagline_rect = Rect { x: area.x, y: tagline_y, width: area.width, height: 1 };
+    frame.render_widget(
+        Paragraph::new(Span::styled(tagline, tagline_style)).alignment(Alignment::Center),
+        tagline_rect,
+    );
+
+    let hint_y = tagline_y + 2;
+    if hint_y < area.y + area.height {
+        let hint_rect = Rect { x: area.x, y: hint_y, width: area.width, height: 1 };
+        let hint_style = Style::default().fg(Color::DarkGray);
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("scanning ", hint_style),
+                Span::styled(
+                    state.root.display().to_string(),
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                ),
+            ]))
+            .alignment(Alignment::Center),
+            hint_rect,
+        );
+    }
 }
 
 // ─── Status bar ──────────────────────────────────────────────────────────────

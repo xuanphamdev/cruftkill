@@ -107,6 +107,10 @@ pub async fn run(args: CliArgs) -> anyhow::Result<()> {
 
         tokio::select! {
             _ = tick.tick() => {
+                // Refresh live progress counter from the scanner.
+                state.dirs_scanned =
+                    handle.stats.completed.load(std::sync::atomic::Ordering::Relaxed);
+
                 // Kick off size requests for any new rows we haven't asked about yet.
                 for r in &state.results {
                     if r.size_bytes.is_none() && size_requested.insert(r.path.clone()) {
@@ -182,7 +186,12 @@ pub async fn run(args: CliArgs) -> anyhow::Result<()> {
             }
         }
 
-        if !state.scan_finished && handle.results.is_closed() {
+        // Detect "scan done" via EITHER the channel closing OR the cancel
+        // token firing (the scanner cancels itself when pending hits 0).
+        // Checking both gives belt-and-suspenders coverage: the channel can
+        // remain open briefly while in-flight workers exit, but cancel
+        // reflects logical completion immediately.
+        if !state.scan_finished && (handle.cancel.is_cancelled() || handle.results.is_closed()) {
             state.mark_scan_finished();
         }
     }

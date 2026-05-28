@@ -45,6 +45,11 @@ pub struct AppState {
     /// cursor we switch to "preserve by path" behaviour.
     pub user_navigated: bool,
 
+    /// Live progress counter — number of directories whose contents have
+    /// been read. Sourced from `ScanStats::completed` and refreshed by the
+    /// main loop on each tick.
+    pub dirs_scanned: u64,
+
     /// Last status / error message shown to the user. Cleared on next action.
     pub last_message: Option<String>,
 }
@@ -73,13 +78,27 @@ impl AppState {
             sort_direction,
             scan_finished: false,
             user_navigated: false,
+            dirs_scanned: 0,
             last_message: None,
         }
     }
 
-    /// Total size across all rows that have a known size.
+    /// Total size across all rows that have a known size — backwards compat
+    /// alias for [`releasable_bytes`] + [`saved_bytes`].
     pub fn total_size(&self) -> u64 {
         self.results.iter().filter_map(|r| r.size_bytes).sum()
+    }
+
+    /// Bytes still on disk that the user could reclaim by deleting them.
+    /// Excludes rows already deleted in this session.
+    pub fn releasable_bytes(&self) -> u64 {
+        self.results.iter().filter(|r| !r.deleted).filter_map(|r| r.size_bytes).sum()
+    }
+
+    /// Bytes the user has actually reclaimed (or simulated reclaiming, in
+    /// dry-run mode) during this session.
+    pub fn saved_bytes(&self) -> u64 {
+        self.results.iter().filter(|r| r.deleted).filter_map(|r| r.size_bytes).sum()
     }
 
     /// Currently-highlighted row, if any.
@@ -205,6 +224,7 @@ impl AppState {
         self.cursor = 0;
         self.user_navigated = false;
         self.scan_finished = false;
+        self.dirs_scanned = 0;
         self.last_message = Some("rescanning…".into());
     }
 

@@ -5,11 +5,23 @@
 //!
 //! - one **dispatcher** task that pulls from a single inbound job queue and
 //!   distributes jobs to workers in **round-robin** order
-//! - N **worker** tasks; each owns a private `mpsc::Receiver<Job>` and
-//!   processes jobs serially with async I/O
+//! - N **worker** tasks; each owns a private `mpsc::UnboundedReceiver<Job>`
+//!   and processes jobs serially with async I/O
 //! - workers re-enqueue child directories via `tx_dispatch`
 //! - completion is signalled by a shared `pending: AtomicUsize`: when it
 //!   reaches 0, the [`CancellationToken`] is cancelled and all tasks exit
+//!
+//! **Why unbounded dispatch channels?** A bounded job queue + bounded worker
+//! inboxes can deadlock under realistic load: when every worker is mid-
+//! `explore_dir` and trying to push a child job, and the dispatch queue +
+//! every worker inbox is full, every worker's `send().await` is blocked
+//! waiting on space the dispatcher can't free (because the dispatcher is
+//! also blocked, sending into a full worker inbox). Phase 02 review M1
+//! flagged this as theoretical; it shows up in practice on deep `node_modules`
+//! trees. Unbounded sends never block; memory is implicitly bounded by the
+//! total pending-job count, which is bounded by the on-disk tree size.
+//! The result channel stays bounded so a slow UI exerts backpressure on
+//! `tx_results.send` (which IS wrapped in `select!` against cancel).
 //!
 //! Deviation from npkill: npkill maintains 100 concurrent dir reads PER
 //! worker via Node's event loop. We rely on tokio's multi-thread runtime
@@ -83,7 +95,7 @@ enum Job {
 /// Internal: clones of all the handles a worker needs to do its job.
 #[derive(Clone)]
 struct WorkerHandles {
-    tx_dispatch: mpsc::Sender<Job>,
+    tx_dispatch: mpsc::UnboundedSender<Job>,
     tx_results: mpsc::Sender<ScanFoundFolder>,
     cancel: CancellationToken,
     stats: Arc<ScanStats>,
@@ -101,13 +113,15 @@ pub fn start_scan(root: PathBuf, opts: ScanOptions) -> ScannerHandle {
     let cfg = Arc::new(ScanConfig::from(opts));
     let pending = Arc::new(AtomicUsize::new(0));
 
+    // Bounded result channel — UI exerts backpressure on workers via this.
     let (result_tx, result_rx) = mpsc::channel::<ScanFoundFolder>(1024);
-    let (job_tx, job_rx) = mpsc::channel::<Job>(1024);
+    // UNBOUNDED job dispatch — see module docs for the deadlock rationale.
+    let (job_tx, job_rx) = mpsc::unbounded_channel::<Job>();
 
     let n = optimal_workers();
     let mut worker_inputs = Vec::with_capacity(n);
     for _ in 0..n {
-        let (wtx, wrx) = mpsc::channel::<Job>(256);
+        let (wtx, wrx) = mpsc::unbounded_channel::<Job>();
         worker_inputs.push(wtx);
         let h = WorkerHandles {
             tx_dispatch: job_tx.clone(),
@@ -122,12 +136,11 @@ pub fn start_scan(root: PathBuf, opts: ScanOptions) -> ScannerHandle {
     tokio::spawn(dispatcher(job_rx, worker_inputs, cancel.clone()));
 
     // Seed the root exploration. Increment-before-send keeps pending counts
-    // consistent: by the time `send` completes, the job is owned by a task.
+    // consistent: unbounded send is synchronous so this is fully race-free.
     pending.fetch_add(1, Ordering::SeqCst);
-    if job_tx.try_send(Job::Explore(root)).is_err() {
-        // Practically dead: the channel was just created with capacity 1024
-        // and the dispatcher cannot have exited before its first `recv`.
-        // Guard against spawn-order regressions.
+    if job_tx.send(Job::Explore(root)).is_err() {
+        // Practically dead: dispatcher cannot have exited before its first
+        // `recv`. Guard against spawn-order regressions.
         debug_assert!(false, "scanner: seed job rejected at construction");
         if pending.fetch_sub(1, Ordering::SeqCst) == 1 {
             cancel.cancel();
@@ -147,8 +160,8 @@ fn optimal_workers() -> usize {
 }
 
 async fn dispatcher(
-    mut rx: mpsc::Receiver<Job>,
-    outs: Vec<mpsc::Sender<Job>>,
+    mut rx: mpsc::UnboundedReceiver<Job>,
+    outs: Vec<mpsc::UnboundedSender<Job>>,
     cancel: CancellationToken,
 ) {
     let mut idx = 0usize;
@@ -161,8 +174,10 @@ async fn dispatcher(
                 Some(job) => {
                     let target = &outs[idx];
                     idx = (idx + 1) % outs.len();
-                    // If the chosen worker has exited, the whole scan is shutting down.
-                    if target.send(job).await.is_err() {
+                    // Unbounded send is synchronous and only fails if the
+                    // worker has dropped its receiver (i.e. it has exited
+                    // already because cancel fired).
+                    if target.send(job).is_err() {
                         break;
                     }
                 }
@@ -172,7 +187,7 @@ async fn dispatcher(
     // dropping `outs` here closes worker inboxes; workers will exit on `None`
 }
 
-async fn worker_loop(mut rx: mpsc::Receiver<Job>, h: WorkerHandles) {
+async fn worker_loop(mut rx: mpsc::UnboundedReceiver<Job>, h: WorkerHandles) {
     loop {
         tokio::select! {
             biased;
@@ -231,8 +246,9 @@ async fn explore_dir(path: PathBuf, h: &WorkerHandles) {
 
         if is_target {
             let risk = h.cfg.perform_risk.then(RiskAnalysis::safe);
-            // Receiver dropped means caller bailed; drop the result silently
-            // and let the cancel branch above end the loop.
+            // Result channel is bounded — wrap in cancel select so we can
+            // bail out promptly if the consumer dropped or the scan was
+            // cancelled mid-send.
             tokio::select! {
                 biased;
                 _ = h.cancel.cancelled() => break,
@@ -241,18 +257,11 @@ async fn explore_dir(path: PathBuf, h: &WorkerHandles) {
             h.stats.found.fetch_add(1, Ordering::SeqCst);
             // Invariant: do NOT recurse into a matched target.
         } else {
-            // Increment-before-send so completion-check is race-free.
-            // The send is wrapped in `select!` against cancel to avoid a
-            // theoretical fan-out deadlock when dispatcher + all worker
-            // inboxes are saturated (see Phase 02 review M1).
+            // Increment-before-send keeps the completion check race-free.
+            // Unbounded dispatch never blocks, so no select needed.
             h.pending.fetch_add(1, Ordering::SeqCst);
-            let send_result = tokio::select! {
-                biased;
-                _ = h.cancel.cancelled() => Err(()),
-                r = h.tx_dispatch.send(Job::Explore(subpath)) => r.map_err(|_| ()),
-            };
-            if send_result.is_err() {
-                // Cancelled or dispatcher gone — roll back so completion math holds.
+            if h.tx_dispatch.send(Job::Explore(subpath)).is_err() {
+                // Dispatcher gone — roll back so completion math holds.
                 if h.pending.fetch_sub(1, Ordering::SeqCst) == 1 {
                     h.cancel.cancel();
                 }
