@@ -10,7 +10,7 @@
 //! real terminal — see the `tests` module below.
 
 use std::path::PathBuf;
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use crate::core::sort::sort_results;
 use crate::core::types::{FolderResult, ScanFoundFolder, SortBy, SortDirection};
@@ -98,7 +98,18 @@ pub struct AppState {
     /// Background "is there a newer version on crates.io?" probe. Defaults
     /// to `Checking`; the main loop transitions it once the probe lands.
     pub update_status: UpdateStatus,
+
+    /// When this run (or rescan) was kicked off. The renderer keeps the
+    /// ASCII-logo splash on screen until this hits the
+    /// [`SPLASH_DURATION`] grace window, even if results have already
+    /// started streaming in — otherwise the logo flashes for a single
+    /// frame on fast filesystems and the user never sees it.
+    pub startup_at: Instant,
 }
+
+/// How long the renderer holds the splash on screen before yielding to the
+/// results table, regardless of incoming scan output.
+pub const SPLASH_DURATION: std::time::Duration = std::time::Duration::from_millis(1200);
 
 impl AppState {
     /// Create a new state with the default sort (`Size` desc).
@@ -127,7 +138,14 @@ impl AppState {
             dirs_scanned: 0,
             last_message: None,
             update_status: UpdateStatus::default(),
+            startup_at: Instant::now(),
         }
+    }
+
+    /// True while the renderer should keep showing the splash logo, even if
+    /// results have already started streaming in.
+    pub fn show_splash(&self) -> bool {
+        self.results.is_empty() || self.startup_at.elapsed() < SPLASH_DURATION
     }
 
     /// Total size across all rows that have a known size — backwards compat
@@ -319,6 +337,8 @@ impl AppState {
         self.scan_finished = false;
         self.dirs_scanned = 0;
         self.last_message = Some("rescanning…".into());
+        // Reset the splash timer so the logo flashes again after a rescan.
+        self.startup_at = Instant::now();
     }
 
     fn toggle_or_switch_sort(&mut self, by: SortBy, default_direction: SortDirection) {
@@ -496,6 +516,16 @@ mod tests {
 
     fn push(state: &mut AppState, p: &str) {
         state.push_result(ScanFoundFolder::new(PathBuf::from(p), None));
+    }
+
+    #[test]
+    fn show_splash_holds_for_grace_window_even_with_results() {
+        let mut s = fresh_state();
+        // Empty: definitely splash.
+        assert!(s.show_splash());
+        // With a result in the first few ms after startup: still splash.
+        push(&mut s, "/a/node_modules");
+        assert!(s.show_splash(), "splash must persist during grace window");
     }
 
     #[test]

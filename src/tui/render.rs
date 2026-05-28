@@ -152,7 +152,11 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 // ─── Results table / empty state ─────────────────────────────────────────────
 
 fn draw_table(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
-    if state.results.is_empty() {
+    // Hold the splash on screen for a grace window after startup even if
+    // results have already arrived (fast filesystems can find the first
+    // node_modules in well under one frame, which used to make the logo
+    // invisible). See `AppState::show_splash`.
+    if state.show_splash() {
         draw_empty_state(frame, area, state);
         return;
     }
@@ -247,22 +251,30 @@ fn draw_table(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 fn draw_empty_state(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let logo_height = LOGO.len() as u16;
     // Logo + blank line + tagline + blank line + hint = logo_height + 4 rows.
-    let block_height = logo_height + 4;
-    if area.height < block_height + 2 {
-        // Terminal too small for the splash; just bail out — the header
-        // already shows progress and the table area will be blank.
+    let full_block = logo_height + 4;
+    // Always try to draw at least the logo itself — only bail when there
+    // genuinely isn't room for any of it. On small terminals we degrade
+    // gracefully by dropping the tagline / hint / banner one by one.
+    if area.height < logo_height {
         return;
     }
 
     let logo_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
     let logo_x = area.x + area.width.saturating_sub(LOGO_WIDTH) / 2;
-    let top_y = area.y + area.height.saturating_sub(block_height) / 2;
+    let top_y = area.y + area.height.saturating_sub(full_block.min(area.height)) / 2;
     for (i, line) in LOGO.iter().enumerate() {
-        let rect = Rect { x: logo_x, y: top_y + i as u16, width: LOGO_WIDTH, height: 1 };
+        let y = top_y + i as u16;
+        if y >= area.y + area.height {
+            break;
+        }
+        let rect = Rect { x: logo_x, y, width: LOGO_WIDTH, height: 1 };
         frame.render_widget(Paragraph::new(Span::styled(*line, logo_style)), rect);
     }
 
     let tagline_y = top_y + logo_height + 1;
+    if tagline_y >= area.y + area.height {
+        return;
+    }
     let (tagline, tagline_style) = if state.scan_finished {
         ("no matching folders found".to_string(), Style::default().fg(Color::DarkGray))
     } else if state.dirs_scanned == 0 {
