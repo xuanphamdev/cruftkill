@@ -12,12 +12,13 @@ use clap::{ArgAction, Parser, ValueEnum};
 use crate::core::profiles::{DEFAULT_PROFILE, profile_names};
 use crate::core::types::SortBy;
 
-/// `cft` — find and delete `node_modules` (and other build-cache folders).
+/// `cft` — polyglot dev-cache reaper. Finds and deletes build-cache folders
+/// across 17 ecosystems (node, python, rust, java, swift, dotnet, …).
 #[derive(Debug, Parser)]
 #[command(
     name = "cft",
     version,
-    about = "Find and delete node_modules and friends",
+    about = "Polyglot dev-cache reaper — kill node_modules, .venv, target, DerivedData, and the rest of your build cruft",
     long_about = None,
 )]
 pub struct CliArgs {

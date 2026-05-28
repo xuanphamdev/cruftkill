@@ -49,8 +49,8 @@ cft --help
 From source:
 
 ```bash
-git clone https://github.com/xuanphamdev/nodemoduleskiller
-cd nodemoduleskiller
+git clone https://github.com/xuanphamdev/cruftkill
+cd cruftkill
 cargo install --path .
 ```
 
@@ -187,9 +187,9 @@ This crate was originally published as
 [`nodemoduleskiller`](https://crates.io/crates/nodemoduleskiller) v0.1.0
 (binary `nmk`). It was renamed to **`cruftkill`** (binary `cft`) in v0.2.0
 because the scope had outgrown "node_modules only" — the tool now wipes 17
-different language ecosystems' build cruft from a single command. The git
-repository URL still resolves to the original name; only the cargo crate
-and binary were renamed.
+different language ecosystems' build cruft from a single command. The
+GitHub repository was renamed too; the old URL `xuanphamdev/nodemoduleskiller`
+auto-redirects to `xuanphamdev/cruftkill`.
 
 ## Attribution
 

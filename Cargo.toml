@@ -1,14 +1,14 @@
 [package]
 name = "cruftkill"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.85"
 authors = ["xuanphamdev"]
 description = "Polyglot dev-cache reaper — find and delete node_modules, .venv, target, DerivedData and the rest of your build cruft from a fast terminal UI"
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/xuanphamdev/nodemoduleskiller"
-homepage = "https://github.com/xuanphamdev/nodemoduleskiller"
+repository = "https://github.com/xuanphamdev/cruftkill"
+homepage = "https://github.com/xuanphamdev/cruftkill"
 documentation = "https://docs.rs/cruftkill"
 keywords = ["cli", "disk-cleanup", "cache", "tui", "developer-tools"]
 categories = ["command-line-utilities", "filesystem"]
