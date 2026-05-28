@@ -1,6 +1,6 @@
 [package]
 name = "cruftkill"
-version = "0.2.3"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.85"
 authors = ["xuanphamdev"]
@@ -48,3 +48,31 @@ tempfile = "3"
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+
+# ── cargo-dist (release automation) ──────────────────────────────────────────
+# `dist plan` to inspect, `dist build` to produce a local archive, or push a
+# git tag matching `Cargo.toml::version` to trigger the CI release pipeline
+# at `.github/workflows/release.yml`.
+
+[workspace.metadata.dist]
+cargo-dist-version = "0.32.0"
+ci = "github"
+installers = ["shell", "powershell", "npm", "homebrew"]
+tap = "xuanphamdev/homebrew-tap"
+publish-jobs = ["npm", "homebrew"]
+npm-package = "cruftkill"
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+]
+install-path = "CARGO_HOME"
+install-updater = false
+
+# Faster local dev: keep the standard release profile but allow dist's
+# slim hooks too.
+[profile.dist]
+inherits = "release"
+lto = "thin"
